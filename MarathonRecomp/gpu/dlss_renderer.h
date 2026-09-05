@@ -35,7 +35,14 @@ namespace DLSSRenderer
         uint32_t& renderWidth,
         uint32_t& renderHeight);
 
-    // Advances the temporal jitter sequence once for a new guest frame.
+    // True only when Marathon exposes a perspective primary gameplay camera
+    // whose view/projection matrices can be resolved for temporal reprojection.
+    // Menu/loading frames deliberately stay native-resolution instead of
+    // entering a reduced-resolution DLSS path that cannot be evaluated.
+    bool HasValidGameplayCamera();
+
+    // Advances the temporal jitter sequence once for a new guest frame. Passing
+    // a zero input extent disables jitter and invalidates temporal history.
     void BeginFrame(uint32_t renderWidth, uint32_t renderHeight, uint32_t outputWidth, uint32_t outputHeight);
     uint32_t GetFrameIndex();
     float GetJitterX();
