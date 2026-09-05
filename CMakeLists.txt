@@ -51,3 +51,7 @@ add_subdirectory(${MARATHON_RECOMP_TOOLS_ROOT})
 # Include sub-projects.
 add_subdirectory("MarathonRecompLib")
 add_subdirectory("MarathonRecomp")
+
+# Optional experimental renderer integrations are applied after the executable
+# target exists so the normal build remains untouched unless explicitly enabled.
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSS.cmake")
