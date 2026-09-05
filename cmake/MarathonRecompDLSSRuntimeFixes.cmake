@@ -66,7 +66,7 @@ endmacro()
 _mr_dlss_runtime_streamline_replace(
     "adding the per-frame history-reset diagnostic"
     "        constants.reset = temporalData.resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;"
-    "        const char* resetEveryFrameEnvironment = std::getenv(\"MARATHON_DLSS_RESET_EVERY_FRAME\");\n        const bool resetEveryFrameDiagnostic =\n            resetEveryFrameEnvironment != nullptr &&\n            resetEveryFrameEnvironment[0] != '\\0' &&\n            resetEveryFrameEnvironment[0] != '0';\n        constants.reset = (temporalData.resetHistory || resetEveryFrameDiagnostic)\n            ? sl::Boolean::eTrue\n            : sl::Boolean::eFalse;")
+    "        const char* resetEveryFrameEnvironment = std::getenv(\"MARATHON_DLSS_RESET_EVERY_FRAME\");\n        const bool resetEveryFrameDiagnostic =\n            resetEveryFrameEnvironment != nullptr &&\n            resetEveryFrameEnvironment[0] != 0 &&\n            resetEveryFrameEnvironment[0] != '0';\n        constants.reset = (temporalData.resetHistory || resetEveryFrameDiagnostic)\n            ? sl::Boolean::eTrue\n            : sl::Boolean::eFalse;")
 
 _mr_dlss_runtime_streamline_replace(
     "reporting the history-reset diagnostic"
