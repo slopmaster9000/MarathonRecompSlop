@@ -84,10 +84,12 @@ endforeach()
 
 set(_MR_DLSS_VIDEO_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/video.cpp")
 set(_MR_DLSS_APP_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/app.cpp")
+set(_MR_DLSS_STREAMLINE_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_streamline.cpp")
 set(_MR_DLSS_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated/MarathonRecomp")
 set(_MR_DLSS_GENERATED_GPU_DIR "${_MR_DLSS_GENERATED_DIR}/gpu")
 set(_MR_DLSS_GENERATED_VIDEO "${_MR_DLSS_GENERATED_GPU_DIR}/video_dlss.cpp")
 set(_MR_DLSS_GENERATED_APP "${_MR_DLSS_GENERATED_DIR}/app_dlss.cpp")
+set(_MR_DLSS_GENERATED_STREAMLINE "${_MR_DLSS_GENERATED_GPU_DIR}/dlss_streamline_dlss.cpp")
 
 file(READ "${_MR_DLSS_VIDEO_SOURCE}" _mr_dlss_video)
 
@@ -182,7 +184,7 @@ _mr_dlss_replace(
 _mr_dlss_replace(
     "tracking the scene depth bound with the guest backbuffer"
     "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);"
-    "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);\n    DLSSConsiderDepthSurface(args.renderTarget, args.depthStencil);")
+    "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);\n    DLSSConsiderDepthSurface(g_renderTarget, args.depthStencil);")
 
 _mr_dlss_replace(
     "evaluating DLSS before host ImGui"
@@ -224,9 +226,26 @@ _mr_dlss_app_replace(
     "    pRenderConfig->Width = Video::s_viewportWidth;\n    pRenderConfig->Height = Video::s_viewportHeight;"
     "    uint32_t renderWidth = Video::s_viewportWidth;\n    uint32_t renderHeight = Video::s_viewportHeight;\n    DLSSRenderer::GetRenderSize(Video::s_viewportWidth, Video::s_viewportHeight, renderWidth, renderHeight);\n    pRenderConfig->Width = renderWidth;\n    pRenderConfig->Height = renderHeight;")
 
+# Streamline 2.12's sl::Constants does not expose renderingGameFrames. Keep the
+# source explicit about intent, but strip that one version-incompatible member
+# assignment from the generated translation unit rather than pretending the
+# field exists or aliasing it to an unrelated constant.
+file(READ "${_MR_DLSS_STREAMLINE_SOURCE}" _mr_dlss_streamline)
+set(_MR_DLSS_RENDERING_GAME_FRAMES_LINE "        constants.renderingGameFrames = sl::Boolean::eTrue;\n")
+string(FIND "${_mr_dlss_streamline}" "${_MR_DLSS_RENDERING_GAME_FRAMES_LINE}" _mr_dlss_streamline_offset)
+if(_mr_dlss_streamline_offset EQUAL -1)
+    message(FATAL_ERROR "DLSS Streamline patch failed while removing the unavailable renderingGameFrames member.")
+endif()
+string(REPLACE
+    "${_MR_DLSS_RENDERING_GAME_FRAMES_LINE}"
+    ""
+    _mr_dlss_streamline
+    "${_mr_dlss_streamline}")
+
 file(MAKE_DIRECTORY "${_MR_DLSS_GENERATED_GPU_DIR}")
 file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_video}")
 file(WRITE "${_MR_DLSS_GENERATED_APP}" "${_mr_dlss_app}")
+file(WRITE "${_MR_DLSS_GENERATED_STREAMLINE}" "${_mr_dlss_streamline}")
 
 set_source_files_properties(
     "${_MR_DLSS_VIDEO_SOURCE}"
@@ -237,7 +256,7 @@ set_source_files_properties(
 target_sources(MarathonRecomp PRIVATE
     "${_MR_DLSS_GENERATED_VIDEO}"
     "${_MR_DLSS_GENERATED_APP}"
-    "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_streamline.cpp"
+    "${_MR_DLSS_GENERATED_STREAMLINE}"
     "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_renderer.cpp")
 
 target_include_directories(MarathonRecomp PRIVATE
