@@ -45,6 +45,21 @@ _mr_dlss_runtime_video_replace(
     "            commandList->setPipeline(g_gammaCorrectionPipeline.get());"
     "            commandList->setPipeline(DLSSGetGammaScalePipeline());")
 
+# The history-reset A/B test showed that the artifact is temporal reprojection,
+# not raster jitter. Add a second diagnostic that replaces our explicit camera
+# MVs with an all-invalid MV field and asks Streamline to reconstruct camera
+# motion from depth + the supplied matrices. This isolates our compute shader
+# from the depth/matrix inputs without changing the normal default path.
+_mr_dlss_runtime_video_replace(
+    "adding the Streamline camera-motion diagnostic"
+    "    auto* commandList = g_commandLists[g_frame].get();\n    if (!DLSSGenerateCameraMotionVectors(temporalData, commandList))\n        return false;\n\n    temporalData.motionVectorScaleX = 1.0f / float(g_dlssRenderWidth);\n    temporalData.motionVectorScaleY = 1.0f / float(g_dlssRenderHeight);\n    temporalData.cameraMotionIncluded = true;\n    temporalData.motionVectorsInvalidValue = 0.0f;"
+    "    auto* commandList = g_commandLists[g_frame].get();\n\n    const char* streamlineCameraMotionEnvironment = std::getenv(\"MARATHON_DLSS_STREAMLINE_CAMERA_MOTION\");\n    const bool useStreamlineCameraMotion =\n        streamlineCameraMotionEnvironment != nullptr &&\n        streamlineCameraMotionEnvironment[0] != 0 &&\n        streamlineCameraMotionEnvironment[0] != '0';\n\n    DLSS::TemporalData motionTemporalData = temporalData;\n    if (useStreamlineCameraMotion)\n        motionTemporalData.resetHistory = true; // Writes zero to every MV pixel below.\n\n    if (!DLSSGenerateCameraMotionVectors(motionTemporalData, commandList))\n        return false;\n\n    temporalData.motionVectorScaleX = 1.0f / float(g_dlssRenderWidth);\n    temporalData.motionVectorScaleY = 1.0f / float(g_dlssRenderHeight);\n    temporalData.cameraMotionIncluded = !useStreamlineCameraMotion;\n    // In diagnostic mode the motion texture is all zero and zero is declared\n    // invalid, so Streamline reconstructs camera motion from depth/matrices.\n    temporalData.motionVectorsInvalidValue = 0.0f;")
+
+_mr_dlss_runtime_video_replace(
+    "reporting the camera-motion diagnostic"
+    "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; camera MVs; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");"
+    "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; %s; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        useStreamlineCameraMotion ? \"Streamline camera reconstruction\" : \"camera MVs\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");")
+
 file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_runtime_video}")
 
 # Add a controlled temporal diagnostic without making it the default. When
