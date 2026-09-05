@@ -230,12 +230,12 @@ static void DLSSResolveRenderSize()
     g_dlssRenderWidth = g_dlssOutputWidth;
     g_dlssRenderHeight = g_dlssOutputHeight;
 
-    // Do not reduce menu/loading/non-gameplay frames. They do not provide the
-    // complete temporal/depth inputs needed to evaluate DLSS, and presenting a
-    // reduced fallback target caused the exact 2/3-size 4K menu regression.
+    // The guest RenderConfig is initialized at the DLSS input size, so all
+    // guest rendering (including menus/video surfaces) must use the same
+    // internal extent. Non-gameplay frames simply skip temporal evaluation;
+    // the final gamma pass spatially scales the internal image after the
+    // logical backbuffer is restored to the output extent.
     g_dlssGameplayFrame = DLSSRenderer::HasValidGameplayCamera();
-    if (!g_dlssGameplayFrame)
-        return;
 
     uint32_t renderWidth = 0;
     uint32_t renderHeight = 0;
@@ -294,8 +294,8 @@ static void DLSSPrepareFrameResources()
     }
     else
     {
-        // Zero extent means native non-gameplay frame: no projection jitter and
-        // discard prior gameplay history so re-entering a level starts cleanly.
+        // Zero extent disables projection jitter and discards prior gameplay
+        // history. The guest itself still renders at the internal DLSS extent.
         DLSSRenderer::BeginFrame(0, 0, g_dlssOutputWidth, g_dlssOutputHeight);
     }
 
@@ -372,17 +372,27 @@ static void DLSSPrepareFrameResources()
 
 static void DLSSConsiderDepthSurface(GuestSurface* renderTarget, GuestSurface* depthStencil)
 {
-    if (!g_dlssGameplayFrame || renderTarget != g_backBuffer)
+    if (!g_dlssGameplayFrame || renderTarget == nullptr || depthStencil == nullptr)
         return;
 
-    if (depthStencil == nullptr || !RenderFormatIsDepth(depthStencil->format))
+    // The guest normally renders the 3D scene into an EDRAM-backed surface,
+    // not directly into the host logical backbuffer. Match the color/depth pair
+    // by the actual internal render extent instead of requiring pointer equality
+    // with g_backBuffer (which prevented any depth from being selected).
+    if (RenderFormatIsDepth(renderTarget->format) || !RenderFormatIsDepth(depthStencil->format))
         return;
 
-    if (depthStencil->sampleCount != RenderSampleCount::COUNT_1)
+    if (renderTarget->sampleCount != RenderSampleCount::COUNT_1 ||
+        depthStencil->sampleCount != RenderSampleCount::COUNT_1)
+    {
         return;
+    }
 
-    if (depthStencil->width != g_dlssRenderWidth || depthStencil->height != g_dlssRenderHeight)
+    if (renderTarget->width != g_dlssRenderWidth || renderTarget->height != g_dlssRenderHeight ||
+        depthStencil->width != g_dlssRenderWidth || depthStencil->height != g_dlssRenderHeight)
+    {
         return;
+    }
 
     g_dlssDepthCandidate = depthStencil;
     g_dlssDepthCandidateReverseZ = g_dlssCurrentReverseZ;
@@ -393,12 +403,14 @@ static void DLSSSetDepthDirection(bool reverseZ)
     g_dlssCurrentReverseZ = reverseZ;
 
     // SetRenderTargets normally runs before SetViewport. If the chosen scene
-    // depth is already bound when the viewport reveals reverse-Z, update the
+    // depth is still bound when the viewport reveals reverse-Z, update the
     // candidate rather than preserving the earlier default assumption.
     if (g_dlssGameplayFrame &&
-        g_renderTarget == g_backBuffer &&
+        g_renderTarget != nullptr &&
         g_depthStencil != nullptr &&
-        g_depthStencil == g_dlssDepthCandidate)
+        g_depthStencil == g_dlssDepthCandidate &&
+        g_renderTarget->width == g_dlssRenderWidth &&
+        g_renderTarget->height == g_dlssRenderHeight)
     {
         g_dlssDepthCandidateReverseZ = reverseZ;
     }
@@ -472,7 +484,8 @@ static bool DLSSGenerateCameraMotionVectors(
 static bool DLSSEvaluateRenderedFrame()
 {
     // Always restore the logical output extent before host ImGui/presentation,
-    // including every failure path below.
+    // including every failure path below. If DLSS is skipped or fails, the
+    // gamma pass therefore spatially scales the internal intermediary to output.
     struct OutputExtentGuard
     {
         ~OutputExtentGuard() { DLSSRestoreOutputExtent(); }
@@ -500,10 +513,15 @@ static bool DLSSEvaluateRenderedFrame()
         return false;
     }
 
+    // One last chance to capture the color/depth pair that is still bound at
+    // the end of guest rendering. This is useful on frames where the depth
+    // stencil was bound before our per-frame tracking state was established.
+    DLSSConsiderDepthSurface(g_renderTarget, g_depthStencil);
+
     if (g_dlssDepthCandidate == nullptr || g_dlssDepthCandidate->texture == nullptr)
     {
         DLSSRenderer::SetStatus(
-            "waiting for %ux%u scene depth bound with the guest backbuffer",
+            "waiting for matching %ux%u scene color/depth surfaces",
             g_dlssRenderWidth,
             g_dlssRenderHeight);
         return false;
