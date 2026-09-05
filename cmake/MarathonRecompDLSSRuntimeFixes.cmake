@@ -49,9 +49,10 @@ file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_runtime_video}")
 
 # Add a controlled temporal diagnostic without making it the default. When
 # MARATHON_DLSS_RESET_EVERY_FRAME is non-zero, NGX receives reset=true every
-# frame. The camera-MV compute pass sees the same reset bit and writes zero
-# motion. If whole-scene swimming disappears in this mode, the artifact is in
-# temporal reprojection inputs (depth/matrices/MVs), not raster jitter.
+# frame. If whole-scene swimming disappears in this mode, persistent temporal
+# history/reprojection is implicated rather than guest raster jitter. The
+# existing camera-motion texture is intentionally left unchanged so this test
+# isolates history reset rather than changing two variables at once.
 file(READ "${_MR_DLSS_GENERATED_STREAMLINE}" _mr_dlss_runtime_streamline)
 
 macro(_mr_dlss_runtime_streamline_replace _description _needle _replacement)
