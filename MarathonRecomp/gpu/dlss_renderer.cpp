@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 
 namespace DLSSRenderer
 {
@@ -189,8 +190,6 @@ namespace DLSSRenderer
             const Sonicteam::SoX::Scenery::CameraImp* bestCamera = nullptr;
             float bestScore = 1.0e9f;
 
-            // Group zero is the primary player viewport in the single-player game.
-            // Prefer a perspective camera whose declared aspect is closest to 16:9.
             for (auto& spCamera : game->m_vvspCameras[0])
             {
                 auto* camera = static_cast<Sonicteam::SoX::Scenery::CameraImp*>(spCamera.get());
@@ -265,8 +264,6 @@ namespace DLSSRenderer
             }
 
             bestError = best->error;
-            // A loose threshold tolerates the game's float math while still
-            // refusing unrelated matrices instead of feeding fabricated data.
             if (!IsFinite(bestError) || bestError > 0.05f)
                 return false;
 
@@ -278,15 +275,22 @@ namespace DLSSRenderer
             }
             else
             {
-                // Streamline's D3D conventions are represented as row-major
-                // row-vector transforms. Transpose a column-vector camera into
-                // that representation before deriving temporal transforms.
                 rowView = Transpose(view);
                 rowProjection = Transpose(best->projection);
                 rowViewProjection = Transpose(best->viewProjection);
             }
 
             return true;
+        }
+
+        bool IsJitterDisabledForDiagnostics()
+        {
+            static const bool disabled = []
+            {
+                const char* value = std::getenv("MARATHON_DLSS_DISABLE_JITTER");
+                return value != nullptr && value[0] != '\0' && value[0] != '0';
+            }();
+            return disabled;
         }
     }
 
@@ -295,11 +299,33 @@ namespace DLSSRenderer
         return DLSS::GetOptimalRenderSize(outputWidth, outputHeight, kMode, renderWidth, renderHeight);
     }
 
+    bool HasValidGameplayCamera()
+    {
+        const auto* camera = FindCamera();
+        if (camera == nullptr)
+            return false;
+
+        Matrix view{};
+        Matrix projection{};
+        Matrix viewProjection{};
+        float matrixError = 0.0f;
+        return ResolveCameraMatrices(*camera, view, projection, viewProjection, matrixError);
+    }
+
     void BeginFrame(uint32_t renderWidth, uint32_t renderHeight, uint32_t outputWidth, uint32_t outputHeight)
     {
         ++g_frameIndex;
 
         if (renderWidth == 0 || renderHeight == 0)
+        {
+            g_jitterX = 0.0f;
+            g_jitterY = 0.0f;
+            g_havePreviousViewProjection = false;
+            g_previousCamera = nullptr;
+            return;
+        }
+
+        if (IsJitterDisabledForDiagnostics())
         {
             g_jitterX = 0.0f;
             g_jitterY = 0.0f;
@@ -311,7 +337,6 @@ namespace DLSSRenderer
         const uint32_t phaseCount = std::max(8u, uint32_t(std::ceil(8.0f * scaleX * scaleY)));
         const uint32_t phase = ((g_frameIndex - 1) % phaseCount) + 1;
 
-        // Pixel-space projection jitter expected by Streamline/NGX.
         g_jitterX = Halton(phase, 2) - 0.5f;
         g_jitterY = Halton(phase, 3) - 0.5f;
     }
@@ -388,7 +413,6 @@ namespace DLSSRenderer
         temporalData.motionVectorScaleX = 1.0f;
         temporalData.motionVectorScaleY = 1.0f;
 
-        // Inverse view is world-from-camera in row-vector form.
         temporalData.cameraRight[0] = inverseView.m[0][0];
         temporalData.cameraRight[1] = inverseView.m[0][1];
         temporalData.cameraRight[2] = inverseView.m[0][2];
@@ -415,7 +439,11 @@ namespace DLSSRenderer
         g_havePreviousViewProjection = true;
         g_previousCamera = camera;
 
-        SetStatus("camera temporal data ready (matrix error %.5f%s)", matrixError, reset ? ", reset" : "");
+        SetStatus(
+            "camera temporal data ready (matrix error %.5f%s%s)",
+            matrixError,
+            reset ? ", reset" : "",
+            IsJitterDisabledForDiagnostics() ? ", jitter off" : "");
         return true;
     }
 
@@ -439,6 +467,7 @@ namespace DLSSRenderer
 namespace DLSSRenderer
 {
     bool GetRenderSize(uint32_t, uint32_t, uint32_t&, uint32_t&) { return false; }
+    bool HasValidGameplayCamera() { return false; }
     void BeginFrame(uint32_t, uint32_t, uint32_t, uint32_t) {}
     uint32_t GetFrameIndex() { return 0; }
     float GetJitterX() { return 0.0f; }
