@@ -18,6 +18,8 @@ static uint32_t g_dlssAllocatedOutputWidth;
 static uint32_t g_dlssAllocatedOutputHeight;
 static uint32_t g_dlssAllocatedMotionWidth;
 static uint32_t g_dlssAllocatedMotionHeight;
+static uint32_t g_dlssAspectMetricWidth;
+static uint32_t g_dlssAspectMetricHeight;
 static bool g_dlssFrameSucceeded;
 
 static void DLSSResolveRenderSize()
@@ -37,9 +39,39 @@ static void DLSSResolveRenderSize()
     }
 }
 
+static void DLSSApplyGuestAspectMetrics()
+{
+    if (g_dlssRenderWidth == 0 || g_dlssRenderHeight == 0 ||
+        (g_dlssAspectMetricWidth == g_dlssRenderWidth &&
+         g_dlssAspectMetricHeight == g_dlssRenderHeight))
+    {
+        return;
+    }
+
+    // Marathon's CSD/HUD aspect-ratio patches are normally derived from the
+    // host viewport. In the DLSS path the guest actually rasterizes into the
+    // smaller input target, so using the host 4K dimensions makes UI geometry
+    // 1.5x too large at Quality mode (2160/1440), which crops menus/HUD before
+    // DLSS ever sees them. Recompute those guest-side metrics for the physical
+    // DLSS input size while keeping Video::s_viewport* as the real output size
+    // for swap-chain presentation and Streamline.
+    const uint32_t outputWidth = Video::s_viewportWidth;
+    const uint32_t outputHeight = Video::s_viewportHeight;
+
+    Video::s_viewportWidth = g_dlssRenderWidth;
+    Video::s_viewportHeight = g_dlssRenderHeight;
+    AspectRatioPatches::ComputeOffsets();
+    Video::s_viewportWidth = outputWidth;
+    Video::s_viewportHeight = outputHeight;
+
+    g_dlssAspectMetricWidth = g_dlssRenderWidth;
+    g_dlssAspectMetricHeight = g_dlssRenderHeight;
+}
+
 static void DLSSPrepareFrameResources()
 {
     DLSSResolveRenderSize();
+    DLSSApplyGuestAspectMetrics();
     DLSSRenderer::BeginFrame(
         g_dlssRenderWidth,
         g_dlssRenderHeight,
