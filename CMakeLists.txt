@@ -9,15 +9,24 @@ set(MARATHON_RECOMP_TOOLS_ROOT ${CMAKE_SOURCE_DIR}/tools)
 set(CMAKE_CXX_STANDARD 20)
 set(BUILD_SHARED_LIBS OFF)
 
-# Enable Hot Reload for MSVC compilers if supported.
+# CMP0141 must be selected before project() so CMake uses the modern MSVC debug
+# information model during compiler detection. The format itself is
+# compiler-dependent, so set it only after project() has identified the compiler.
 if (POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW)
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 project("MarathonRecomp-ALL")
+
+# Enable Edit and Continue only for Microsoft's compiler. clang-cl uses the
+# MSVC ABI too, but CMake 4.4 evaluates CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+# during compiler probing and rejects the old compiler-ID generator expression.
+if (POLICY CMP0141 AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+      "$<IF:$<CONFIG:Debug>,EditAndContinue,$<$<CONFIG:RelWithDebInfo>:ProgramDatabase>>")
+endif()
 
 if (APPLE)
     enable_language(OBJC OBJCXX)
