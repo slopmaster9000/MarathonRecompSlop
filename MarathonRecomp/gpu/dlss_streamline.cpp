@@ -17,8 +17,6 @@
 #endif
 
 #ifndef MARATHON_RECOMP_DLSS_PROJECT_ID
-// NGX's no-NVIDIA-application-ID initialization path requires a stable,
-// GUID-like project identifier owned by the application/engine integrator.
 #define MARATHON_RECOMP_DLSS_PROJECT_ID "1d357e2d-4a03-4ec8-9d6f-b55a2034dd72"
 #endif
 
@@ -40,7 +38,6 @@ namespace DLSS
             va_start(args, format);
             std::vsnprintf(g_status.data(), g_status.size(), format, args);
             va_end(args);
-
             std::fprintf(stderr, "[DLSS] %s\n", g_status.data());
         }
 
@@ -72,8 +69,6 @@ namespace DLSS
             options.colorBuffersHDR = sl::Boolean::eFalse;
             options.useAutoExposure = sl::Boolean::eTrue;
             options.alphaUpscalingEnabled = sl::Boolean::eFalse;
-
-            // Streamline 2.12 / current transformer-model recommendations.
             options.dlaaPreset = sl::DLSSPreset::ePresetK;
             options.qualityPreset = sl::DLSSPreset::ePresetK;
             options.balancedPreset = sl::DLSSPreset::ePresetK;
@@ -124,13 +119,8 @@ namespace DLSS
         preferences.featuresToLoad = features;
         preferences.numFeaturesToLoad = 1;
 #ifdef MARATHON_RECOMP_DLSS_APP_ID
-        // Studios with an NVIDIA-issued application ID can pass it through.
         preferences.applicationId = static_cast<uint32_t>(MARATHON_RECOMP_DLSS_APP_ID);
 #else
-        // Streamline can omit an NVIDIA-issued application ID, but NGX-backed
-        // features still require the custom-engine ProjectID path. The NGX SDK
-        // explicitly permits applications to supply their own GUID-like project
-        // identifier when no NVIDIA application ID has been assigned.
         preferences.engine = sl::EngineType::eCustom;
         preferences.engineVersion = MARATHON_RECOMP_DLSS_ENGINE_VERSION;
         preferences.projectId = MARATHON_RECOMP_DLSS_PROJECT_ID;
@@ -171,9 +161,6 @@ namespace DLSS
             return false;
         }
 
-        // When sl.interposer.lib is linked, Plume may hold an SL proxy. The
-        // feature API wants the underlying D3D12 device, so unwrap it when
-        // possible and fall back to the pointer Plume owns for native builds.
         ID3D12Device* nativeDevice = nullptr;
         const sl::Result nativeResult = slGetNativeInterface(
             d3d12Device->d3d,
@@ -342,6 +329,7 @@ namespace DLSS
         CopyMatrix(constants.prevClipToClip, temporalData.prevClipToClip);
         constants.jitterOffset = sl::float2(temporalData.jitterX, temporalData.jitterY);
         constants.mvecScale = sl::float2(temporalData.motionVectorScaleX, temporalData.motionVectorScaleY);
+        constants.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
         constants.cameraPos = sl::float3(
             temporalData.cameraPosition[0], temporalData.cameraPosition[1], temporalData.cameraPosition[2]);
         constants.cameraUp = sl::float3(
@@ -358,6 +346,7 @@ namespace DLSS
         constants.cameraMotionIncluded = temporalData.cameraMotionIncluded ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         constants.motionVectors3D = sl::Boolean::eFalse;
         constants.reset = temporalData.resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+        constants.renderingGameFrames = sl::Boolean::eTrue;
         constants.orthographicProjection = sl::Boolean::eFalse;
         constants.motionVectorsDilated = sl::Boolean::eFalse;
         constants.motionVectorsJittered = sl::Boolean::eFalse;
@@ -445,8 +434,6 @@ namespace DLSS
             return false;
         }
 
-        // Streamline changes native D3D12 command-list state. Let Plume know
-        // that its descriptor-heap cache must be rebound by the next host pass.
         commandList->notifyDescriptorHeapWasChangedExternally();
 
         if (!g_evaluatedAtLeastOneFrame)
