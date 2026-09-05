@@ -12,7 +12,7 @@ set(BUILD_SHARED_LIBS OFF)
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW)
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -58,3 +58,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSS.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSRuntimeFixes.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSMatrixDiagnostic.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSDepthDiagnostic.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSXenosDiagnostic.cmake")
