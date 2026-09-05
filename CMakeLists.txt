@@ -41,7 +41,7 @@ if (MARATHON_RECOMP_ARCHITECTURE STREQUAL "x86_64" OR MARATHON_RECOMP_ARCHITECTU
 endif()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    # Normally only defined by Visual Studio, added for consistency
+    # Normally defined by Visual Studio, added for consistency
     add_compile_definitions(_DEBUG)
 endif()
 
@@ -55,3 +55,4 @@ add_subdirectory("MarathonRecomp")
 # Optional experimental renderer integrations are applied after the executable
 # target exists so the normal build remains untouched unless explicitly enabled.
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSS.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSRuntimeFixes.cmake")
