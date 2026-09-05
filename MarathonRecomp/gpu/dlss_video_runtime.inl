@@ -28,6 +28,9 @@ static uint32_t g_dlssAllocatedMotionHeight;
 static uint32_t g_dlssAspectMetricWidth;
 static uint32_t g_dlssAspectMetricHeight;
 static bool g_dlssFrameSucceeded;
+static bool g_dlssGameplayFrame;
+static bool g_dlssCurrentReverseZ;
+static bool g_dlssDepthCandidateReverseZ;
 
 struct DLSSMotionConstants
 {
@@ -49,11 +52,8 @@ static bool DLSSCreateMotionPipeline()
 
     g_dlssMotionPipelineAttempted = true;
 
-    // This is the first motion-vector implementation pass. It reconstructs a
-    // dense current->previous camera-motion field from the exact depth buffer
-    // consumed by DLSS and the same unjittered clipToPrevClip transform sent to
-    // Streamline. Object motion is intentionally not fabricated here; moving
-    // objects still need a later guest-shader/object-transform integration.
+    // Reconstruct dense current->previous camera motion from the exact scene
+    // depth buffer consumed by DLSS. Object motion remains a later pass.
     static constexpr char motionShaderSource[] = R"HLSL(
 Texture2D<float> g_Depth : register(t0, space0);
 RWTexture2D<float2> g_Motion : register(u0, space0);
@@ -81,16 +81,19 @@ void shaderMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // Marathon applies temporal jitter by translating the D3D viewport. Undo
-    // that translation before reconstructing unjittered clip coordinates so
-    // the motion vectors themselves remain unjittered; Streamline receives the
-    // jitter separately in sl::Constants::jitterOffset.
+    // Marathon applies jitter by translating the D3D viewport. Reconstruct an
+    // unjittered current clip position because Streamline receives jitterOffset
+    // independently and motionVectorsJittered is false.
     const float2 samplePixel = float2(pixel) + 0.5;
     const float2 currentPixel = samplePixel - g_Jitter;
     const float2 currentNdc = float2(
         currentPixel.x * g_InvRenderSize.x * 2.0 - 1.0,
         1.0 - currentPixel.y * g_InvRenderSize.y * 2.0);
 
+    // D3D depth is already clipZ/clipW in [0,1]. This reconstruction remains
+    // valid for reverse-Z because the supplied projection/clip transform and
+    // depth buffer share the same convention; Streamline is separately told
+    // whether that convention is inverted.
     const float depth = g_Depth.Load(int3(pixel, 0));
     const float4 currentClip = float4(currentNdc, depth, 1.0);
     const float4 previousClip = mul(currentClip, g_ClipToPrevClip);
@@ -112,8 +115,6 @@ void shaderMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         (previousNdc.x * 0.5 + 0.5) * g_RenderSize.x,
         (0.5 - previousNdc.y * 0.5) * g_RenderSize.y);
 
-    // DLSS expects current -> previous motion. Store pixel-space vectors and
-    // provide 1/renderSize through mvecScale so Streamline normalizes them.
     g_Motion[pixel] = previousPixel - currentPixel;
 }
 )HLSL";
@@ -229,6 +230,13 @@ static void DLSSResolveRenderSize()
     g_dlssRenderWidth = g_dlssOutputWidth;
     g_dlssRenderHeight = g_dlssOutputHeight;
 
+    // Do not reduce menu/loading/non-gameplay frames. They do not provide the
+    // complete temporal/depth inputs needed to evaluate DLSS, and presenting a
+    // reduced fallback target caused the exact 2/3-size 4K menu regression.
+    g_dlssGameplayFrame = DLSSRenderer::HasValidGameplayCamera();
+    if (!g_dlssGameplayFrame)
+        return;
+
     uint32_t renderWidth = 0;
     uint32_t renderHeight = 0;
     if (DLSSRenderer::GetRenderSize(g_dlssOutputWidth, g_dlssOutputHeight, renderWidth, renderHeight) &&
@@ -248,13 +256,6 @@ static void DLSSApplyGuestAspectMetrics()
         return;
     }
 
-    // Marathon's CSD/HUD aspect-ratio patches are normally derived from the
-    // host viewport. In the DLSS path the guest actually rasterizes into the
-    // smaller input target, so using the host 4K dimensions makes UI geometry
-    // 1.5x too large at Quality mode (2160/1440), which crops menus/HUD before
-    // DLSS ever sees them. Recompute those guest-side metrics for the physical
-    // DLSS input size while keeping Video::s_viewport* as the real output size
-    // for swap-chain presentation and Streamline.
     const uint32_t outputWidth = Video::s_viewportWidth;
     const uint32_t outputHeight = Video::s_viewportHeight;
 
@@ -268,33 +269,52 @@ static void DLSSApplyGuestAspectMetrics()
     g_dlssAspectMetricHeight = g_dlssRenderHeight;
 }
 
+static void DLSSRestoreOutputExtent()
+{
+    if (g_backBuffer == nullptr)
+        return;
+
+    g_backBuffer->width = g_dlssOutputWidth;
+    g_backBuffer->height = g_dlssOutputHeight;
+    g_backBuffer->format = DLSS_SCENE_FORMAT;
+}
+
 static void DLSSPrepareFrameResources()
 {
     DLSSResolveRenderSize();
     DLSSApplyGuestAspectMetrics();
-    DLSSRenderer::BeginFrame(
-        g_dlssRenderWidth,
-        g_dlssRenderHeight,
-        g_dlssOutputWidth,
-        g_dlssOutputHeight);
+
+    if (g_dlssGameplayFrame)
+    {
+        DLSSRenderer::BeginFrame(
+            g_dlssRenderWidth,
+            g_dlssRenderHeight,
+            g_dlssOutputWidth,
+            g_dlssOutputHeight);
+    }
+    else
+    {
+        // Zero extent means native non-gameplay frame: no projection jitter and
+        // discard prior gameplay history so re-entering a level starts cleanly.
+        DLSSRenderer::BeginFrame(0, 0, g_dlssOutputWidth, g_dlssOutputHeight);
+    }
 
     g_dlssDepthCandidate = nullptr;
+    g_dlssDepthCandidateReverseZ = false;
+    g_dlssCurrentReverseZ = false;
     g_dlssFrameSucceeded = false;
 
-    // CheckSwapChain() describes the logical guest backbuffer using the host
-    // viewport dimensions. In the DLSS path the actual intermediary color
-    // texture is smaller (for example 2560x1440 for a 3840x2160 Quality
-    // output). Keep the GuestSurface dimensions in lockstep with that texture
-    // while the guest scene is rendering; otherwise SetDefaultViewport() emits
-    // a 3840x2160 viewport into a 2560x1440 target, cropping the NDC range and
-    // producing the characteristic ~1.5x zoom/offset seen at Quality mode.
-    // DLSSEvaluateRenderedFrame() restores output dimensions before host UI.
     if (g_backBuffer != nullptr)
     {
         g_backBuffer->width = g_dlssRenderWidth;
         g_backBuffer->height = g_dlssRenderHeight;
         g_backBuffer->format = DLSS_SCENE_FORMAT;
     }
+
+    // Output/MV resources are only meaningful when this frame can actually be
+    // evaluated by DLSS. Existing allocations are retained across menu frames.
+    if (!g_dlssGameplayFrame)
+        return;
 
     const bool outputChanged =
         g_dlssOutputTexture == nullptr ||
@@ -350,16 +370,38 @@ static void DLSSPrepareFrameResources()
     }
 }
 
-static void DLSSConsiderDepthSurface(GuestSurface* surface)
+static void DLSSConsiderDepthSurface(GuestSurface* renderTarget, GuestSurface* depthStencil)
 {
-    if (surface == nullptr || !RenderFormatIsDepth(surface->format))
+    if (!g_dlssGameplayFrame || renderTarget != g_backBuffer)
         return;
 
-    if (surface->sampleCount != RenderSampleCount::COUNT_1)
+    if (depthStencil == nullptr || !RenderFormatIsDepth(depthStencil->format))
         return;
 
-    if (surface->width == g_dlssRenderWidth && surface->height == g_dlssRenderHeight)
-        g_dlssDepthCandidate = surface;
+    if (depthStencil->sampleCount != RenderSampleCount::COUNT_1)
+        return;
+
+    if (depthStencil->width != g_dlssRenderWidth || depthStencil->height != g_dlssRenderHeight)
+        return;
+
+    g_dlssDepthCandidate = depthStencil;
+    g_dlssDepthCandidateReverseZ = g_dlssCurrentReverseZ;
+}
+
+static void DLSSSetDepthDirection(bool reverseZ)
+{
+    g_dlssCurrentReverseZ = reverseZ;
+
+    // SetRenderTargets normally runs before SetViewport. If the chosen scene
+    // depth is already bound when the viewport reveals reverse-Z, update the
+    // candidate rather than preserving the earlier default assumption.
+    if (g_dlssGameplayFrame &&
+        g_renderTarget == g_backBuffer &&
+        g_depthStencil != nullptr &&
+        g_depthStencil == g_dlssDepthCandidate)
+    {
+        g_dlssDepthCandidateReverseZ = reverseZ;
+    }
 }
 
 static bool DLSSGenerateCameraMotionVectors(
@@ -389,9 +431,6 @@ static bool DLSSGenerateCameraMotionVectors(
     constants.jitter[1] = temporalData.jitterY;
     constants.reset = temporalData.resetHistory ? 1u : 0u;
 
-    // The depth target must be shader-readable for reprojection. AddBarrier also
-    // updates the GuestSurface's tracked layout, so the next guest depth bind
-    // will correctly transition it back to DEPTH_WRITE.
     AddBarrier(g_dlssDepthCandidate, RenderTextureLayout::SHADER_READ);
     FlushBarriers();
 
@@ -432,6 +471,16 @@ static bool DLSSGenerateCameraMotionVectors(
 
 static bool DLSSEvaluateRenderedFrame()
 {
+    // Always restore the logical output extent before host ImGui/presentation,
+    // including every failure path below.
+    struct OutputExtentGuard
+    {
+        ~OutputExtentGuard() { DLSSRestoreOutputExtent(); }
+    } outputExtentGuard;
+
+    if (!g_dlssGameplayFrame)
+        return false;
+
     if (!DLSS::IsAvailable())
     {
         DLSSRenderer::SetStatus("Streamline/DLSS unavailable for frame evaluation");
@@ -454,7 +503,7 @@ static bool DLSSEvaluateRenderedFrame()
     if (g_dlssDepthCandidate == nullptr || g_dlssDepthCandidate->texture == nullptr)
     {
         DLSSRenderer::SetStatus(
-            "waiting for %ux%u single-sample scene depth",
+            "waiting for %ux%u scene depth bound with the guest backbuffer",
             g_dlssRenderWidth,
             g_dlssRenderHeight);
         return false;
@@ -464,14 +513,12 @@ static bool DLSSEvaluateRenderedFrame()
     if (!DLSSRenderer::BuildTemporalData(temporalData))
         return false;
 
-    auto* commandList = g_commandLists[g_frame].get();
+    temporalData.depthInverted = g_dlssDepthCandidateReverseZ;
 
+    auto* commandList = g_commandLists[g_frame].get();
     if (!DLSSGenerateCameraMotionVectors(temporalData, commandList))
         return false;
 
-    // The generated field is in input-resolution pixel units and already
-    // includes camera motion. Streamline normalizes it using these factors and
-    // must not try to reconstruct camera motion a second time.
     temporalData.motionVectorScaleX = 1.0f / float(g_dlssRenderWidth);
     temporalData.motionVectorScaleY = 1.0f / float(g_dlssRenderHeight);
     temporalData.cameraMotionIncluded = true;
@@ -500,9 +547,6 @@ static bool DLSSEvaluateRenderedFrame()
 
     g_dlssFrameSucceeded = true;
 
-    // The logical backbuffer now becomes the full-resolution DLSS output. The
-    // existing ImGui render command runs next, so host UI/profiler is rendered
-    // after DLSS instead of being part of its input history.
     g_backBuffer->texture = g_dlssOutputTexture.get();
     g_backBuffer->width = g_dlssOutputWidth;
     g_backBuffer->height = g_dlssOutputHeight;
@@ -516,11 +560,12 @@ static bool DLSSEvaluateRenderedFrame()
     g_dirtyStates.scissorRect = true;
 
     DLSSRenderer::SetStatus(
-        "Quality %ux%u -> %ux%u; explicit camera MVs active; object motion pending",
+        "Quality %ux%u -> %ux%u; camera MVs; depth %s; object motion pending",
         g_dlssRenderWidth,
         g_dlssRenderHeight,
         g_dlssOutputWidth,
-        g_dlssOutputHeight);
+        g_dlssOutputHeight,
+        g_dlssDepthCandidateReverseZ ? "reverse-Z" : "forward-Z");
     return true;
 }
 
