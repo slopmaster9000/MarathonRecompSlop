@@ -4,6 +4,22 @@
 
 #include <cstdint>
 
+// dlss_video_runtime.inl is injected into video.cpp before video.cpp's private
+// barrier helpers are defined. Forward-declare those internal helpers so the
+// injected motion-vector pass can transition the selected guest depth surface
+// and then use the original definitions later in the same translation unit.
+// These declarations have internal linkage and are unused in the other DLSS
+// translation units that include this header.
+#if defined(MARATHON_RECOMP_DLSS)
+struct GuestBaseTexture;
+namespace plume
+{
+    enum class RenderTextureLayout;
+}
+static void AddBarrier(GuestBaseTexture* texture, plume::RenderTextureLayout layout);
+static void FlushBarriers();
+#endif
+
 namespace DLSSRenderer
 {
     // The first renderer integration uses DLSS Quality. This keeps the POC
