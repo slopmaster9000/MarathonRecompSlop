@@ -56,3 +56,4 @@ add_subdirectory("MarathonRecomp")
 # target exists so the normal build remains untouched unless explicitly enabled.
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSS.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSRuntimeFixes.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSMatrixDiagnostic.cmake")
