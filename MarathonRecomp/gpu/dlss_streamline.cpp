@@ -16,6 +16,12 @@
 #define MARATHON_RECOMP_DLSS_ENGINE_VERSION "MarathonRecomp-DLSS-POC"
 #endif
 
+#ifndef MARATHON_RECOMP_DLSS_PROJECT_ID
+// NGX's no-NVIDIA-application-ID initialization path requires a stable,
+// GUID-like project identifier owned by the application/engine integrator.
+#define MARATHON_RECOMP_DLSS_PROJECT_ID "1d357e2d-4a03-4ec8-9d6f-b55a2034dd72"
+#endif
+
 namespace DLSS
 {
     namespace
@@ -118,14 +124,16 @@ namespace DLSS
         preferences.featuresToLoad = features;
         preferences.numFeaturesToLoad = 1;
 #ifdef MARATHON_RECOMP_DLSS_APP_ID
-        // Studios with an NVIDIA-issued application ID can pass it through,
-        // but Streamline does not require one for custom-engine integrations.
+        // Studios with an NVIDIA-issued application ID can pass it through.
         preferences.applicationId = static_cast<uint32_t>(MARATHON_RECOMP_DLSS_APP_ID);
 #else
-        // Streamline 2.12 documents applicationId as optional. When it is not
-        // supplied, identify the renderer as a custom engine with a version.
+        // Streamline can omit an NVIDIA-issued application ID, but NGX-backed
+        // features still require the custom-engine ProjectID path. The NGX SDK
+        // explicitly permits applications to supply their own GUID-like project
+        // identifier when no NVIDIA application ID has been assigned.
         preferences.engine = sl::EngineType::eCustom;
         preferences.engineVersion = MARATHON_RECOMP_DLSS_ENGINE_VERSION;
+        preferences.projectId = MARATHON_RECOMP_DLSS_PROJECT_ID;
 #endif
 
         const sl::Result result = slInit(preferences);
@@ -139,7 +147,7 @@ namespace DLSS
 #ifdef MARATHON_RECOMP_DLSS_APP_ID
         SetStatus("Streamline initialized with NVIDIA application ID; waiting for D3D12 device");
 #else
-        SetStatus("Streamline initialized with custom engine identity; waiting for D3D12 device");
+        SetStatus("Streamline initialized with custom NGX project identity; waiting for D3D12 device");
 #endif
 
         if (!g_shutdownRegistered)
@@ -201,7 +209,7 @@ namespace DLSS
         if (result != sl::Result::eOk)
         {
             g_available = false;
-            SetStatus("DLSS SR unavailable on selected adapter (result %d)", static_cast<int>(result));
+            SetStatus("DLSS SR support check failed (result %d)", static_cast<int>(result));
             return false;
         }
 
