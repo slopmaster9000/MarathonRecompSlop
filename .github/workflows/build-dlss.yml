@@ -1,0 +1,168 @@
+name: Build DLSS Release
+
+on:
+  push:
+    branches:
+      - dlss-poc
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+
+concurrency:
+  group: build-dlss-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-dlss:
+    name: Windows x64 Clang Release + DLSS
+    runs-on: windows-latest
+
+    env:
+      CMAKE_PRESET: x64-Clang-Release
+      STREAMLINE_VERSION: 2.12.0
+
+    steps:
+      - name: Check private asset secrets
+        shell: pwsh
+        env:
+          ASSET_REPO: ${{ secrets.ASSET_REPO }}
+          ASSET_REPO_TOKEN: ${{ secrets.ASSET_REPO_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ASSET_REPO) -or
+              [string]::IsNullOrWhiteSpace($env:ASSET_REPO_TOKEN)) {
+            Write-Error "Set repository Actions secrets ASSET_REPO and ASSET_REPO_TOKEN before running the DLSS build."
+            exit 1
+          }
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout private game assets
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.ASSET_REPO }}
+          token: ${{ secrets.ASSET_REPO_TOKEN }}
+          path: .\private
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-${{ runner.os }}-dlss-${{ env.CMAKE_PRESET }}
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./thirdparty/vcpkg/downloads
+            ./thirdparty/vcpkg/packages
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          choco install ninja -y
+          Remove-Item -Path "C:\ProgramData\Chocolatey\bin\ccache.exe" -Force -ErrorAction SilentlyContinue
+
+      - name: Configure Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Prepare game assets
+        shell: pwsh
+        run: |
+          $required = @("default.xex", "shader.arc", "shader_lt.arc")
+          foreach ($file in $required) {
+            $source = Join-Path ".\private" $file
+            if (-not (Test-Path $source)) {
+              Write-Error "Missing required game asset in the private repository: $file"
+              exit 1
+            }
+          }
+          Copy-Item .\private\* .\MarathonRecompLib\private -Force
+
+      - name: Download Streamline SDK 2.12.0
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "streamline-sdk-v$env:STREAMLINE_VERSION.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "streamline-sdk"
+          $url = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v$env:STREAMLINE_VERSION/streamline-sdk-v$env:STREAMLINE_VERSION.zip"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $extractRoot -Force
+
+          $slHeader = Get-ChildItem -Path $extractRoot -Recurse -File -Filter "sl.h" |
+            Where-Object { $_.Directory.Name -eq "include" } |
+            Select-Object -First 1
+
+          if (-not $slHeader) {
+            Write-Error "Could not locate include/sl.h in the extracted Streamline SDK."
+            exit 1
+          }
+
+          $sdkRoot = Split-Path $slHeader.DirectoryName -Parent
+          "STREAMLINE_SDK_ROOT=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Streamline SDK root: $sdkRoot"
+
+      - name: Configure DLSS build
+        shell: pwsh
+        run: |
+          cmake . --preset $env:CMAKE_PRESET `
+            -DSDL2MIXER_VORBIS=VORBISFILE `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+            -DMARATHON_RECOMP_D3D12=ON `
+            -DMARATHON_RECOMP_DLSS=ON `
+            "-DSTREAMLINE_SDK_ROOT=$env:STREAMLINE_SDK_ROOT"
+
+      - name: Build DLSS release
+        shell: pwsh
+        run: cmake --build .\out\build\${{ env.CMAKE_PRESET }} --target MarathonRecomp
+
+      - name: Verify Streamline runtime
+        shell: pwsh
+        run: |
+          $buildOut = ".\out\build\$env:CMAKE_PRESET\MarathonRecomp"
+          $required = @(
+            "sl.interposer.dll",
+            "sl.common.dll",
+            "sl.pcl.dll",
+            "sl.dlss.dll",
+            "nvngx_dlss.dll"
+          )
+
+          foreach ($file in $required) {
+            $path = Join-Path $buildOut $file
+            if (-not (Test-Path $path)) {
+              Write-Error "DLSS build completed but required Streamline runtime file is missing: $file"
+              exit 1
+            }
+          }
+
+      - name: Pack release
+        shell: pwsh
+        run: |
+          $buildOut = ".\out\build\$env:CMAKE_PRESET\MarathonRecomp"
+          $release = ".\release"
+
+          New-Item -ItemType Directory -Path $release -Force | Out-Null
+
+          Copy-Item "$buildOut\MarathonRecomp.exe" $release -Force
+          Get-ChildItem "$buildOut\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $release -Force
+          Get-ChildItem "$buildOut\*.json" -ErrorAction SilentlyContinue | Copy-Item -Destination $release -Force
+
+          if (Test-Path "$buildOut\D3D12") {
+            Copy-Item "$buildOut\D3D12" "$release\D3D12" -Recurse -Force
+          }
+
+          Write-Host "Release contents:"
+          Get-ChildItem $release -Recurse | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Upload DLSS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarathonRecomp-Windows-x64-Clang-Release-DLSS
+          path: .\release
+          if-no-files-found: error
