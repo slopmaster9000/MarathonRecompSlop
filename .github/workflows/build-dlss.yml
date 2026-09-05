@@ -21,6 +21,9 @@ jobs:
       CMAKE_PRESET: x64-Clang-Release
       STREAMLINE_VERSION: 2.12.0
       PRIVATE_ASSET_REPO: slopmaster9000/MarathonRecompPrivate
+      # Keep MarathonRecomp's vcpkg manifest baseline pinned, but use current
+      # vcpkg tooling so auxiliary MSYS2 packages still exist on public mirrors.
+      VCPKG_TOOL_REV: 04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4
 
     steps:
       - name: Check private asset token
@@ -70,20 +73,31 @@ jobs:
           path: .\private
           persist-credentials: false
 
+      - name: Refresh vcpkg tool scripts
+        shell: pwsh
+        run: |
+          Write-Host "MarathonRecomp manifest baseline remains pinned by vcpkg.json."
+          Write-Host "Refreshing vcpkg tooling to $env:VCPKG_TOOL_REV to avoid removed MSYS2 bootstrap packages."
+          git -C .\thirdparty\vcpkg fetch --no-tags --depth=1 origin $env:VCPKG_TOOL_REV
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C .\thirdparty\vcpkg checkout --detach $env:VCPKG_TOOL_REV
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C .\thirdparty\vcpkg rev-parse HEAD
+
       - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: hendrikmuhs/ccache-action@v1.2.24
         with:
           key: ccache-${{ runner.os }}-dlss-${{ env.CMAKE_PRESET }}
 
       - name: Cache vcpkg
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ./thirdparty/vcpkg/downloads
             ./thirdparty/vcpkg/packages
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TOOL_REV }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_TOOL_REV }}-
 
       - name: Install dependencies
         shell: pwsh
@@ -185,7 +199,7 @@ jobs:
           Get-ChildItem $release -Recurse | ForEach-Object { Write-Host $_.FullName }
 
       - name: Upload DLSS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: MarathonRecomp-Windows-x64-Clang-Release-DLSS
           path: .\release
