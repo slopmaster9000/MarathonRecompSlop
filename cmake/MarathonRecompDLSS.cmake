@@ -185,7 +185,14 @@ file(GLOB _MR_DLSS_JSON_FILES
     "${_MR_DLSS_BIN}/*.json"
     "${_MR_DLSS_BIN}/development/*.json")
 
-add_custom_command(TARGET MarathonRecomp POST_BUILD
+# This module is included from the repository root, while MarathonRecomp itself
+# is created in MarathonRecomp/CMakeLists.txt. CMake's add_custom_command(TARGET)
+# form may only be used in the directory where that target was created. Use
+# prerequisite custom targets instead: they can be declared here, and building
+# MarathonRecomp directly still stages the Streamline runtime before link.
+add_custom_target(MarathonRecompDLSSRuntime
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:MarathonRecomp>
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${_MR_DLSS_RUNTIME_FILES}
         $<TARGET_FILE_DIR:MarathonRecomp>
@@ -193,12 +200,17 @@ add_custom_command(TARGET MarathonRecomp POST_BUILD
     COMMENT "Copying NVIDIA Streamline/DLSS runtime files")
 
 if(_MR_DLSS_JSON_FILES)
-    add_custom_command(TARGET MarathonRecomp POST_BUILD
+    add_custom_target(MarathonRecompDLSSConfig
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            $<TARGET_FILE_DIR:MarathonRecomp>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${_MR_DLSS_JSON_FILES}
             $<TARGET_FILE_DIR:MarathonRecomp>
         COMMAND_EXPAND_LISTS
         COMMENT "Copying NVIDIA Streamline configuration files")
+    add_dependencies(MarathonRecompDLSSRuntime MarathonRecompDLSSConfig)
 endif()
+
+add_dependencies(MarathonRecomp MarathonRecompDLSSRuntime)
 
 message(STATUS "MarathonRecomp experimental DLSS plumbing enabled (Streamline SDK: ${STREAMLINE_SDK_ROOT})")
