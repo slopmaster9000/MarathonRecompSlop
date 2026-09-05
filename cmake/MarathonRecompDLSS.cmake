@@ -82,9 +82,6 @@ foreach(_required_file
     endif()
 endforeach()
 
-# The upstream renderer lives in one very large translation unit. Generate
-# patched copies of video.cpp/app.cpp in the build tree so DLSS remains an
-# opt-in experiment and the normal source files are untouched.
 set(_MR_DLSS_VIDEO_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/video.cpp")
 set(_MR_DLSS_APP_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/app.cpp")
 set(_MR_DLSS_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated/MarathonRecomp")
@@ -107,8 +104,6 @@ _mr_dlss_replace(
     "#include \"video.h\"\n"
     "#include \"video.h\"\n#include \"dlss_streamline.h\"\n#include \"dlss_renderer.h\"\n")
 
-# The original file has one source-relative include that would otherwise resolve
-# against the generated-file directory instead of the source tree.
 _mr_dlss_replace(
     "fixing the XenosRecomp include for the generated source"
     "#include \"../../tools/XenosRecomp/XenosRecomp/shader_common.h\""
@@ -129,16 +124,11 @@ _mr_dlss_replace(
     "                IMGUI_GENERIC_ROW(\"Device\", \"%s\", g_device->getDescription().name.c_str());"
     "                IMGUI_GENERIC_ROW(\"Device\", \"%s\", g_device->getDescription().name.c_str());\n#ifdef MARATHON_RECOMP_DLSS\n                IMGUI_GENERIC_ROW(\"DLSS\", \"%s\", DLSS::GetStatus());\n                IMGUI_GENERIC_ROW(\"DLSS Frame\", \"%s\", DLSSRenderer::GetStatus());\n#endif")
 
-# Pull the frame-side helper into video.cpp only after the renderer's private
-# descriptor allocator/backbuffer globals are declared.
 _mr_dlss_replace(
     "including the DLSS frame runtime bridge"
     "static TextureDescriptorAllocator g_textureDescriptorAllocator;"
     "static TextureDescriptorAllocator g_textureDescriptorAllocator;\n#include \"dlss_video_runtime.inl\"")
 
-# Render the DLSS build's scene/intermediary/UI target in FP16. This gives NGX
-# a UAV-capable high-precision output while the final existing gamma pass still
-# writes the swap-chain's BGRA8 format.
 _mr_dlss_replace(
     "switching ImGui to the DLSS scene format"
     "    pipelineDesc.renderTargetFormat[0] = BACKBUFFER_FORMAT;"
@@ -174,29 +164,26 @@ _mr_dlss_replace(
     "            g_intermediaryBackBufferTexture = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, BACKBUFFER_FORMAT, RenderTextureFlag::RENDER_TARGET));"
     "            g_intermediaryBackBufferTexture = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, DLSS_SCENE_FORMAT, RenderTextureFlag::RENDER_TARGET));")
 
-# DLSS requires single-sample color/depth/motion inputs. The Xbox guest may ask
-# for 2x/4x MSAA surfaces; disable those only in this opt-in DLSS build.
 _mr_dlss_replace(
     "forcing single-sample guest surfaces for DLSS"
     "        if (multiSample == 0) {\n            desc.multisampling.sampleCount = RenderSampleCount::COUNT_1;\n        } else {\n            desc.multisampling.sampleCount = multiSample == 1 ? RenderSampleCount::COUNT_2 : RenderSampleCount::COUNT_4;\n        }"
     "        desc.multisampling.sampleCount = RenderSampleCount::COUNT_1;")
 
-# Apply a subpixel projection offset through the D3D viewport. This affects all
-# translated Xenos vertex shaders consistently without guessing individual
-# guest projection-constant register slots.
 _mr_dlss_replace(
     "applying temporal jitter to internal-resolution viewports"
     "        auto viewport = g_viewport;\n\n        // if (viewport.minDepth > viewport.maxDepth)"
-    "        auto viewport = g_viewport;\n        if (g_renderTarget != nullptr &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight)\n        {\n            viewport.x += DLSSRenderer::GetJitterX();\n            viewport.y += DLSSRenderer::GetJitterY();\n        }\n\n        // if (viewport.minDepth > viewport.maxDepth)")
+    "        auto viewport = g_viewport;\n        if (g_renderTarget != nullptr &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight &&\n            g_dlssGameplayFrame)\n        {\n            viewport.x += DLSSRenderer::GetJitterX();\n            viewport.y += DLSSRenderer::GetJitterY();\n        }\n\n        // if (viewport.minDepth > viewport.maxDepth)")
 
 _mr_dlss_replace(
-    "tracking the matching scene depth buffer"
-    "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);"
-    "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);\n    DLSSConsiderDepthSurface(args.depthStencil);")
+    "tracking reverse-Z for DLSS depth"
+    "    uint32_t specConstants = g_pipelineState.specConstants;\n    if (args.minDepth > args.maxDepth)\n        specConstants |= SPEC_CONSTANT_REVERSE_Z;\n    else \n        specConstants &= ~SPEC_CONSTANT_REVERSE_Z;"
+    "    uint32_t specConstants = g_pipelineState.specConstants;\n    if (args.minDepth > args.maxDepth)\n        specConstants |= SPEC_CONSTANT_REVERSE_Z;\n    else \n        specConstants &= ~SPEC_CONSTANT_REVERSE_Z;\n\n    DLSSSetDepthDirection(args.minDepth > args.maxDepth);")
 
-# Present enqueues ExecutePendingStretchRectCommands immediately before ImGui.
-# Evaluate DLSS at the end of that command so host ImGui is drawn afterward at
-# output resolution rather than becoming part of DLSS temporal history.
+_mr_dlss_replace(
+    "tracking the scene depth bound with the guest backbuffer"
+    "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);"
+    "    SetDirtyValue(g_dirtyStates.renderTargetAndDepthStencil, g_depthStencil, args.depthStencil);\n    SetDirtyValue(g_dirtyStates.pipelineState, g_pipelineState.depthStencilFormat, args.depthStencil != nullptr ? args.depthStencil->format : RenderFormat::UNKNOWN);\n    DLSSConsiderDepthSurface(args.renderTarget, args.depthStencil);")
+
 _mr_dlss_replace(
     "evaluating DLSS before host ImGui"
     "    g_pendingSurfaceCopies.clear();\n    g_pendingResolves.clear();\n}"
@@ -217,9 +204,6 @@ _mr_dlss_replace(
     "                RenderTextureBarrier(g_intermediaryBackBufferTexture.get(), RenderTextureLayout::SHADER_READ),"
     "                RenderTextureBarrier(g_dlssFrameSucceeded ? g_dlssOutputTexture.get() : g_intermediaryBackBufferTexture.get(), RenderTextureLayout::SHADER_READ),")
 
-# Generate an app.cpp variant that tells the Xbox guest to create its primary
-# render surfaces at DLSS's recommended input resolution while preserving the
-# real host/swap-chain viewport as the output resolution.
 file(READ "${_MR_DLSS_APP_SOURCE}" _mr_dlss_app)
 
 macro(_mr_dlss_app_replace _description _needle _replacement)
@@ -244,8 +228,6 @@ file(MAKE_DIRECTORY "${_MR_DLSS_GENERATED_GPU_DIR}")
 file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_video}")
 file(WRITE "${_MR_DLSS_GENERATED_APP}" "${_mr_dlss_app}")
 
-# Disable compilation of the two upstream translation units only for this target
-# and replace them with the generated DLSS variants.
 set_source_files_properties(
     "${_MR_DLSS_VIDEO_SOURCE}"
     "${_MR_DLSS_APP_SOURCE}"
@@ -258,8 +240,6 @@ target_sources(MarathonRecomp PRIVATE
     "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_streamline.cpp"
     "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_renderer.cpp")
 
-# Quote-includes in generated sources normally resolve relative to their source
-# directories. Add the original source roots plus Streamline headers.
 target_include_directories(MarathonRecomp PRIVATE
     "${CMAKE_SOURCE_DIR}/MarathonRecomp"
     "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu"
@@ -269,17 +249,11 @@ target_compile_definitions(MarathonRecomp PRIVATE
     MARATHON_RECOMP_DLSS=1
     MARATHON_RECOMP_DLSS_ENGINE_VERSION=\"${MARATHON_RECOMP_DLSS_ENGINE_VERSION}\")
 
-# If NVIDIA has assigned an application ID, pass it through. Otherwise the
-# bridge uses the custom-engine NGX ProjectID path in dlss_streamline.cpp.
 if(NOT MARATHON_RECOMP_DLSS_APP_ID STREQUAL "")
     target_compile_definitions(MarathonRecomp PRIVATE
         MARATHON_RECOMP_DLSS_APP_ID=${MARATHON_RECOMP_DLSS_APP_ID})
 endif()
 
-# Streamline's DirectX integration is provided by sl.interposer.lib. MarathonRecomp
-# normally links dxgi directly; leaving that import library before Streamline can
-# allow DXGI creation to bypass the interposer. Keep all existing dependencies,
-# remove the direct DXGI import, then put Streamline at the front of the link list.
 get_target_property(_MR_DLSS_LINK_LIBRARIES MarathonRecomp LINK_LIBRARIES)
 if(_MR_DLSS_LINK_LIBRARIES)
     list(REMOVE_ITEM _MR_DLSS_LINK_LIBRARIES dxgi)
