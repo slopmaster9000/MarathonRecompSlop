@@ -49,6 +49,21 @@ static void DLSSPrepareFrameResources()
     g_dlssDepthCandidate = nullptr;
     g_dlssFrameSucceeded = false;
 
+    // CheckSwapChain() describes the logical guest backbuffer using the host
+    // viewport dimensions. In the DLSS path the actual intermediary color
+    // texture is smaller (for example 2560x1440 for a 3840x2160 Quality
+    // output). Keep the GuestSurface dimensions in lockstep with that texture
+    // while the guest scene is rendering; otherwise SetDefaultViewport() emits
+    // a 3840x2160 viewport into a 2560x1440 target, cropping the NDC range and
+    // producing the characteristic ~1.5x zoom/offset seen at Quality mode.
+    // DLSSEvaluateRenderedFrame() restores output dimensions before host UI.
+    if (g_backBuffer != nullptr)
+    {
+        g_backBuffer->width = g_dlssRenderWidth;
+        g_backBuffer->height = g_dlssRenderHeight;
+        g_backBuffer->format = DLSS_SCENE_FORMAT;
+    }
+
     const bool outputChanged =
         g_dlssOutputTexture == nullptr ||
         g_dlssAllocatedOutputWidth != g_dlssOutputWidth ||
