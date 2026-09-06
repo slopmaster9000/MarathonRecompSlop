@@ -31,9 +31,8 @@ endif()
 
 # rt_scene.inl consumes cameraForward as a world-space semantic direction while
 # its reconstructed view position uses Sonic 06's right-handed camera space,
-# where visible geometry has negative Z.  Generate a corrected runtime copy in
+# where visible geometry has negative Z. Generate a corrected runtime copy in
 # the same directory as video_dlss.cpp so quote-include lookup selects it first.
-# Keep the source include readable while this RT path remains experimental.
 set(_MR_RT_GENERATED_SCENE "${_MR_DLSS_GENERATED_GPU_DIR}/rt_scene.inl")
 file(READ "${_MR_RT_SCENE_SOURCE}" _mr_rt_scene)
 string(FIND
@@ -119,7 +118,7 @@ _mr_rt_runtime_replace(
 _mr_rt_runtime_replace(
     "presenting RT shadows when DLSS falls back"
     "    return g_dlssFrameSucceeded\n        ? g_dlssOutputTextureDescriptorIndex\n        : g_intermediaryBackBufferTextureDescriptorIndex;"
-    "#ifdef MARATHON_RECOMP_RT\n    if (RTGammaShadowActive())\n        return RTGammaShadowDescriptor();\n#endif\n\n    return g_dlssFrameSucceeded\n        ? g_dlssOutputTextureDescriptorIndex\n        : g_intermediaryBackBufferTextureDescriptorIndex;")
+    "#ifdef MARATHON_RECOMP_RT\n    // When DLSS succeeds, always present its full-resolution output. The RT\n    // shadow texture is only the render-resolution DLSS input and must not\n    // override a successful upscale. Use it solely as a fallback source.\n    if (!g_dlssFrameSucceeded && RTGammaShadowActive())\n        return RTGammaShadowDescriptor();\n#endif\n\n    return g_dlssFrameSucceeded\n        ? g_dlssOutputTextureDescriptorIndex\n        : g_intermediaryBackBufferTextureDescriptorIndex;")
 
 file(WRITE "${_MR_DLSS_GENERATED_RUNTIME_INL}" "${_mr_rt_runtime}")
 
