@@ -29,24 +29,53 @@ if(NOT EXISTS "${_MR_RT_SCENE_SOURCE}")
     message(FATAL_ERROR "Missing RT scene integration source: ${_MR_RT_SCENE_SOURCE}")
 endif()
 
-# rt_scene.inl consumes cameraForward as a world-space semantic direction while
-# its reconstructed view position uses Sonic 06's right-handed camera space,
-# where visible geometry has negative Z. Generate a corrected runtime copy in
-# the same directory as video_dlss.cpp so quote-include lookup selects it first.
+# Generate an RT-scene copy next to video_dlss.cpp so quote-include lookup picks
+# it before the source-tree file. The base RT module stays reusable while these
+# diagnostics iterate quickly on SlopT.
 set(_MR_RT_GENERATED_SCENE "${_MR_DLSS_GENERATED_GPU_DIR}/rt_scene.inl")
 file(READ "${_MR_RT_SCENE_SOURCE}" _mr_rt_scene)
-string(FIND
-    "${_mr_rt_scene}"
-    "        viewPosition.z * g_CameraForward.xyz;"
-    _mr_rt_view_z_offset)
-if(_mr_rt_view_z_offset EQUAL -1)
-    message(FATAL_ERROR "RT receiver reconstruction fix failed; rt_scene.inl changed.")
-endif()
-string(REPLACE
-    "        viewPosition.z * g_CameraForward.xyz;"
-    "        -viewPosition.z * g_CameraForward.xyz;"
-    _mr_rt_scene
-    "${_mr_rt_scene}")
+
+macro(_mr_rt_scene_replace _description _needle _replacement)
+    string(FIND "${_mr_rt_scene}" "${_needle}" _mr_rt_scene_offset)
+    if(_mr_rt_scene_offset EQUAL -1)
+        message(FATAL_ERROR "RT scene patch failed while ${_description}; rt_scene.inl changed.")
+    endif()
+    string(REPLACE "${_needle}" "${_replacement}" _mr_rt_scene "${_mr_rt_scene}")
+endmacro()
+
+# Reconstruct RT receiver positions using the exact validated camera->world
+# matrix instead of decomposed semantic basis vectors. Sonic's view space is
+# right-handed, and basis reconstruction previously mirrored receiver Z.
+_mr_rt_scene_replace(
+    "adding the exact camera-to-world matrix to RT constants"
+    "    float clipToView[16]{};\n    float cameraRight[4]{};\n    float cameraUp[4]{};\n    float cameraForward[4]{};\n    float cameraPosition[4]{};"
+    "    float clipToView[16]{};\n    float cameraToWorld[16]{};\n    float cameraPosition[4]{};")
+
+_mr_rt_scene_replace(
+    "adding the exact camera-to-world matrix to the RT shader"
+    "    row_major float4x4 g_ClipToView;\n    float4 g_CameraRight;\n    float4 g_CameraUp;\n    float4 g_CameraForward;\n    float4 g_CameraPosition;"
+    "    row_major float4x4 g_ClipToView;\n    row_major float4x4 g_CameraToWorld;\n    float4 g_CameraPosition;")
+
+_mr_rt_scene_replace(
+    "using exact view-to-world receiver reconstruction"
+    "    const float3 worldPosition =\n        g_CameraPosition.xyz +\n        viewPosition.x * g_CameraRight.xyz +\n        viewPosition.y * g_CameraUp.xyz +\n        viewPosition.z * g_CameraForward.xyz;\n\n    const float3 toLight = normalize(g_LightDirection.xyz);"
+    "    const float3 worldPosition = mul(float4(viewPosition, 1.0), g_CameraToWorld).xyz;\n\n    // Diagnostic mode 2 completely ignores the sun. Trace from the validated\n    // camera position toward the rasterized depth receiver. A correctly aligned\n    // TLAS should produce stable, recognizable colored surfaces rather than a\n    // full-screen constant. Instance ID is hashed into RGB to make transforms\n    // and missing geometry obvious.\n    if (g_DebugMask == 2)\n    {\n        const float3 cameraToSurface = worldPosition - g_CameraPosition.xyz;\n        const float cameraDistance = length(cameraToSurface);\n        if (cameraDistance <= 1.0e-4 || !isfinite(cameraDistance))\n        {\n            g_Output[pixel] = float4(0.0, 0.0, 0.0, 1.0);\n            return;\n        }\n\n        RayDesc cameraRay;\n        cameraRay.Origin = g_CameraPosition.xyz;\n        cameraRay.Direction = cameraToSurface / cameraDistance;\n        cameraRay.TMin = max(0.001, g_RayBias);\n        cameraRay.TMax = cameraDistance + max(1.0, g_RayBias * 8.0);\n\n        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE> cameraQuery;\n        cameraQuery.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, cameraRay);\n        while (cameraQuery.Proceed()) {}\n\n        if (cameraQuery.CommittedStatus() != COMMITTED_TRIANGLE_HIT)\n        {\n            g_Output[pixel] = float4(0.0, 0.0, 0.0, 1.0);\n            return;\n        }\n\n        const uint instanceId = cameraQuery.CommittedInstanceID();\n        const float3 idColor = float3(\n            float((instanceId * 97u + 37u) & 255u),\n            float((instanceId * 57u + 113u) & 255u),\n            float((instanceId * 23u + 191u) & 255u)) / 255.0;\n        g_Output[pixel] = float4(idColor * 0.75 + 0.25, 1.0);\n        return;\n    }\n\n    const float3 toLight = normalize(g_LightDirection.xyz);")
+
+_mr_rt_scene_replace(
+    "uploading the exact camera-to-world matrix"
+    "    std::memcpy(constants.clipToView, temporalData.clipToCameraView.m, sizeof(constants.clipToView));\n    std::memcpy(constants.cameraRight, temporalData.cameraRight, sizeof(temporalData.cameraRight));\n    std::memcpy(constants.cameraUp, temporalData.cameraUp, sizeof(temporalData.cameraUp));\n    std::memcpy(constants.cameraForward, temporalData.cameraForward, sizeof(temporalData.cameraForward));\n    std::memcpy(constants.cameraPosition, temporalData.cameraPosition, sizeof(temporalData.cameraPosition));"
+    "    std::memcpy(constants.clipToView, temporalData.clipToCameraView.m, sizeof(constants.clipToView));\n    std::memcpy(constants.cameraToWorld, g_dlssXenosCameraToWorld.m, sizeof(constants.cameraToWorld));\n    std::memcpy(constants.cameraPosition, temporalData.cameraPosition, sizeof(temporalData.cameraPosition));")
+
+_mr_rt_scene_replace(
+    "selecting camera-hit and shadow debug modes"
+    "    constants.debugMask = RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_MASK\", false) ? 1u : 0u;"
+    "    constants.debugMask = RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_CAMERA_HITS\", false)\n        ? 2u\n        : (RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_MASK\", false) ? 1u : 0u);")
+
+_mr_rt_scene_replace(
+    "reporting exact RT transform diagnostics"
+    "    RTSetStatus(\n        \"active: %zu instances, %zu BLAS, %u rejected, light=(%.2f %.2f %.2f)%s\",\n        frame.instances.size(),\n        frame.blases.size(),\n        frame.rejectedDraws,\n        frame.lightDirection[0],\n        frame.lightDirection[1],\n        frame.lightDirection[2],\n        constants.debugMask ? \", DEBUG MASK\" : \"\");"
+    "    const auto& firstTransform = frame.instances.front().transform;\n    RTSetStatus(\n        \"active: %zu inst %zu BLAS rej=%u light=(%.2f %.2f %.2f) cam=(%.1f %.1f %.1f) first=(%.1f %.1f %.1f)%s\",\n        frame.instances.size(),\n        frame.blases.size(),\n        frame.rejectedDraws,\n        frame.lightDirection[0],\n        frame.lightDirection[1],\n        frame.lightDirection[2],\n        temporalData.cameraPosition[0],\n        temporalData.cameraPosition[1],\n        temporalData.cameraPosition[2],\n        firstTransform.m[0][3],\n        firstTransform.m[1][3],\n        firstTransform.m[2][3],\n        constants.debugMask == 2 ? \", CAMERA HITS\" : (constants.debugMask == 1 ? \", SHADOW MASK\" : \"\"));")
+
 file(WRITE "${_MR_RT_GENERATED_SCENE}" "${_mr_rt_scene}")
 
 file(READ "${_MR_DLSS_GENERATED_VIDEO}" _mr_rt_video)
