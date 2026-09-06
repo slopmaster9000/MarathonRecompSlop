@@ -7,6 +7,42 @@ if(NOT EXISTS "${_MR_DLSS_GENERATED_VIDEO}" OR
     message(FATAL_ERROR "DLSS reprojection diagnostic ran before generated DLSS sources were created.")
 endif()
 
+# Build a generated copy of the reprojection helper so diagnostics can test
+# depth conventions without changing the normal DLSS path. The earlier raw
+# depth capture showed far/cleared pixels at d ~= 0 while nearer geometry moves
+# toward 1, i.e. the selected host depth behaves as reverse-Z despite the
+# runtime heuristic currently labelling it forward-Z. Convert that sampled
+# device depth back to the forward [0,1] NDC convention used by the captured
+# c84-c87 Xenos projection before applying clipToPrevClip.
+set(_MR_DLSS_REPROJECTION_SOURCE
+    "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_reprojection_diagnostic.inl")
+set(_MR_DLSS_REPROJECTION_GENERATED
+    "${_MR_DLSS_GENERATED_GPU_DIR}/dlss_reprojection_diagnostic.inl")
+file(READ "${_MR_DLSS_REPROJECTION_SOURCE}" _mr_dlss_reprojection_helper)
+
+set(_MR_DLSS_REPROJECTION_DEPTH_NEEDLE
+    "    const float depth = g_Depth.Load(int3(pixel, 0));")
+string(FIND
+    "${_mr_dlss_reprojection_helper}"
+    "${_MR_DLSS_REPROJECTION_DEPTH_NEEDLE}"
+    _mr_dlss_reprojection_depth_offset)
+if(_mr_dlss_reprojection_depth_offset EQUAL -1)
+    message(FATAL_ERROR "DLSS reprojection diagnostic could not find the depth reconstruction expression.")
+endif()
+string(REPLACE
+    "${_MR_DLSS_REPROJECTION_DEPTH_NEEDLE}"
+    "    // Reverse-Z validation: the host depth capture clears/fades to 0 at far depth,\n    // while the captured Xenos projection maps forward clip depth near=0, far=1.\n    const float depth = 1.0 - g_Depth.Load(int3(pixel, 0));"
+    _mr_dlss_reprojection_helper
+    "${_mr_dlss_reprojection_helper}")
+
+string(REPLACE
+    "Reprojection error %ux%u; Xenos scene + selected depth; NGX skipped"
+    "Reprojection error %ux%u; reverse-depth validation; NGX skipped"
+    _mr_dlss_reprojection_helper
+    "${_mr_dlss_reprojection_helper}")
+
+file(WRITE "${_MR_DLSS_REPROJECTION_GENERATED}" "${_mr_dlss_reprojection_helper}")
+
 # The helper needs the Xenos scene-target latch and the runtime's DLSS resources,
 # so forward-declare it before dlss_video_runtime.inl and include its implementation
 # after the Xenos helpers have been emitted into the generated video translation unit.
