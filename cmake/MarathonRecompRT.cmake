@@ -29,6 +29,27 @@ if(NOT EXISTS "${_MR_RT_SCENE_SOURCE}")
     message(FATAL_ERROR "Missing RT scene integration source: ${_MR_RT_SCENE_SOURCE}")
 endif()
 
+# rt_scene.inl consumes cameraForward as a world-space semantic direction while
+# its reconstructed view position uses Sonic 06's right-handed camera space,
+# where visible geometry has negative Z.  Generate a corrected runtime copy in
+# the same directory as video_dlss.cpp so quote-include lookup selects it first.
+# Keep the source include readable while this RT path remains experimental.
+set(_MR_RT_GENERATED_SCENE "${_MR_DLSS_GENERATED_GPU_DIR}/rt_scene.inl")
+file(READ "${_MR_RT_SCENE_SOURCE}" _mr_rt_scene)
+string(FIND
+    "${_mr_rt_scene}"
+    "        viewPosition.z * g_CameraForward.xyz;"
+    _mr_rt_view_z_offset)
+if(_mr_rt_view_z_offset EQUAL -1)
+    message(FATAL_ERROR "RT receiver reconstruction fix failed; rt_scene.inl changed.")
+endif()
+string(REPLACE
+    "        viewPosition.z * g_CameraForward.xyz;"
+    "        -viewPosition.z * g_CameraForward.xyz;"
+    _mr_rt_scene
+    "${_mr_rt_scene}")
+file(WRITE "${_MR_RT_GENERATED_SCENE}" "${_mr_rt_scene}")
+
 file(READ "${_MR_DLSS_GENERATED_VIDEO}" _mr_rt_video)
 
 macro(_mr_rt_video_replace _description _needle _replacement)
