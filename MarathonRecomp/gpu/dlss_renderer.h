@@ -3,6 +3,7 @@
 #include "dlss_streamline.h"
 
 #include <cstdint>
+#include <cstdlib>
 
 // dlss_video_runtime.inl is injected into video.cpp before video.cpp's private
 // barrier helpers are defined. Forward-declare those internal helpers so the
@@ -22,9 +23,17 @@ static void FlushBarriers();
 
 namespace DLSSRenderer
 {
-    // The first renderer integration uses DLSS Quality. This keeps the POC
-    // deterministic while the user-facing quality-mode UI is still pending.
-    constexpr DLSS::Mode kMode = DLSS::Mode::Quality;
+    // Quality remains the normal POC mode. MARATHON_DLSS_DLAA=1 switches the
+    // same executable to native-resolution DLAA so we can isolate whether the
+    // temporal instability depends on Marathon rendering at a reduced internal
+    // resolution rather than on DLSS temporal reconstruction itself.
+    inline const DLSS::Mode kMode = []
+    {
+        const char* value = std::getenv("MARATHON_DLSS_DLAA");
+        return (value != nullptr && value[0] != '\0' && value[0] != '0')
+            ? DLSS::Mode::DLAA
+            : DLSS::Mode::Quality;
+    }();
 
     // Query the render resolution recommended by DLSS for the requested output.
     // Returns false when DLSS is unavailable and leaves the caller free to use
