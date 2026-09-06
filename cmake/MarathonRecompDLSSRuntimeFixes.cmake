@@ -61,20 +61,20 @@ macro(_mr_dlss_runtime_inl_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_dlss_runtime_inl "${_mr_dlss_runtime_inl}")
 endmacro()
 
-# The history-reset A/B test showed that the artifact is temporal reprojection,
-# not raster jitter. Add a second diagnostic that replaces our explicit camera
-# MVs with an all-invalid MV field and asks Streamline to reconstruct camera
-# motion from depth + the supplied matrices. This isolates our compute shader
-# from the depth/matrix inputs without changing the normal default path.
+# Build 75 showed that the validated Xenos matrices alone did not eliminate the
+# temporal instability. Make Streamline's own camera-motion reconstruction the
+# default so the next build removes our explicit camera-MV shader as a variable.
+# The old path remains available for direct A/B testing with
+# MARATHON_DLSS_EXPLICIT_CAMERA_MOTION=1.
 _mr_dlss_runtime_inl_replace(
-    "adding the Streamline camera-motion diagnostic"
+    "making Streamline camera-motion reconstruction the default"
     "    auto* commandList = g_commandLists[g_frame].get();\n    if (!DLSSGenerateCameraMotionVectors(temporalData, commandList))\n        return false;\n\n    temporalData.motionVectorScaleX = 1.0f / float(g_dlssRenderWidth);\n    temporalData.motionVectorScaleY = 1.0f / float(g_dlssRenderHeight);\n    temporalData.cameraMotionIncluded = true;\n    temporalData.motionVectorsInvalidValue = 0.0f;"
-    "    auto* commandList = g_commandLists[g_frame].get();\n\n    const char* streamlineCameraMotionEnvironment = std::getenv(\"MARATHON_DLSS_STREAMLINE_CAMERA_MOTION\");\n    const bool useStreamlineCameraMotion =\n        streamlineCameraMotionEnvironment != nullptr &&\n        streamlineCameraMotionEnvironment[0] != 0 &&\n        streamlineCameraMotionEnvironment[0] != '0';\n\n    DLSS::TemporalData motionTemporalData = temporalData;\n    if (useStreamlineCameraMotion)\n        motionTemporalData.resetHistory = true; // Writes zero to every MV pixel below.\n\n    if (!DLSSGenerateCameraMotionVectors(motionTemporalData, commandList))\n        return false;\n\n    temporalData.motionVectorScaleX = 1.0f / float(g_dlssRenderWidth);\n    temporalData.motionVectorScaleY = 1.0f / float(g_dlssRenderHeight);\n    temporalData.cameraMotionIncluded = !useStreamlineCameraMotion;\n    // In diagnostic mode the motion texture is all zero and zero is declared\n    // invalid, so Streamline reconstructs camera motion from depth/matrices.\n    temporalData.motionVectorsInvalidValue = 0.0f;")
+    "    auto* commandList = g_commandLists[g_frame].get();\n\n    const char* explicitCameraMotionEnvironment = std::getenv(\"MARATHON_DLSS_EXPLICIT_CAMERA_MOTION\");\n    const bool useExplicitCameraMotion =\n        explicitCameraMotionEnvironment != nullptr &&\n        explicitCameraMotionEnvironment[0] != 0 &&\n        explicitCameraMotionEnvironment[0] != '0';\n\n    DLSS::TemporalData motionTemporalData = temporalData;\n    if (!useExplicitCameraMotion)\n        motionTemporalData.resetHistory = true; // Writes zero to every MV pixel below.\n\n    if (!DLSSGenerateCameraMotionVectors(motionTemporalData, commandList))\n        return false;\n\n    temporalData.motionVectorScaleX = 1.0f / float(g_dlssRenderWidth);\n    temporalData.motionVectorScaleY = 1.0f / float(g_dlssRenderHeight);\n    temporalData.cameraMotionIncluded = useExplicitCameraMotion;\n    // Default path: the motion texture is all zero and zero is declared invalid,\n    // so Streamline reconstructs camera motion from depth + the supplied matrices.\n    // Opt-in A/B path: feed our explicit camera vectors exactly as Build 75 did.\n    temporalData.motionVectorsInvalidValue = 0.0f;")
 
 _mr_dlss_runtime_inl_replace(
-    "reporting the camera-motion diagnostic"
+    "reporting the selected camera-motion path"
     "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; camera MVs; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");"
-    "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; %s; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        useStreamlineCameraMotion ? \"Streamline camera reconstruction\" : \"camera MVs\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");")
+    "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; %s; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        useExplicitCameraMotion ? \"explicit camera MVs\" : \"Streamline camera reconstruction\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");")
 
 file(WRITE "${_MR_DLSS_GENERATED_RUNTIME_INL}" "${_mr_dlss_runtime_inl}")
 
