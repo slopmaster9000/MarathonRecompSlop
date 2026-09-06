@@ -71,6 +71,14 @@ _mr_rt_scene_replace(
     "    constants.debugMask = RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_MASK\", false) ? 1u : 0u;"
     "    constants.debugMask = RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_CAMERA_HITS\", false)\n        ? 2u\n        : (RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_MASK\", false) ? 1u : 0u);")
 
+# Only geometry rendered against the exact main-scene depth surface belongs in
+# the RT scene. Same-resolution reflection/auxiliary passes can otherwise pass
+# the old size/z-write filters while using a different camera transform.
+_mr_rt_scene_replace(
+    "restricting TLAS capture to the selected gameplay depth surface"
+    "        !RTShaderLooksStatic() ||\n        g_renderTarget == nullptr ||\n        g_renderTarget->width != g_dlssRenderWidth ||\n        g_renderTarget->height != g_dlssRenderHeight ||\n        g_indexBufferView.buffer.ref == nullptr)"
+    "        !RTShaderLooksStatic() ||\n        !g_pipelineState.zEnable ||\n        g_renderTarget == nullptr ||\n        g_depthStencil == nullptr ||\n        g_depthStencil != g_dlssDepthCandidate ||\n        g_renderTarget->width != g_dlssRenderWidth ||\n        g_renderTarget->height != g_dlssRenderHeight ||\n        g_indexBufferView.buffer.ref == nullptr)")
+
 _mr_rt_scene_replace(
     "reporting exact RT transform diagnostics"
     "    RTSetStatus(\n        \"active: %zu instances, %zu BLAS, %u rejected, light=(%.2f %.2f %.2f)%s\",\n        frame.instances.size(),\n        frame.blases.size(),\n        frame.rejectedDraws,\n        frame.lightDirection[0],\n        frame.lightDirection[1],\n        frame.lightDirection[2],\n        constants.debugMask ? \", DEBUG MASK\" : \"\");"
