@@ -24,9 +24,10 @@ static DLSSXenosCameraMatrix g_dlssXenosView{};
 static DLSSXenosCameraMatrix g_dlssXenosCameraToWorld{};
 static DLSSXenosCameraMatrix g_dlssXenosProjection{};
 static DLSSXenosCameraMatrix g_dlssXenosViewProjection{};
-static DLSSXenosCameraMatrix g_dlssXenosPreviousViewProjection{};
+static DLSSXenosCameraMatrix g_dlssXenosPreviousCameraToWorld{};
+static DLSSXenosCameraMatrix g_dlssXenosPreviousProjection{};
 static bool g_dlssXenosCameraValid{};
-static bool g_dlssXenosHavePreviousViewProjection{};
+static bool g_dlssXenosHavePreviousCamera{};
 
 static uint32_t DLSSXenosByteSwap32(uint32_t value)
 {
@@ -147,6 +148,38 @@ static bool DLSSXenosInvert(
     return DLSSXenosIsFinite(result);
 }
 
+// Streamline's own matrix helper computes camera-to-previous-camera in a
+// camera-centred world before composing clip transforms. This avoids inverting
+// a full view-projection matrix containing large world translations. The
+// captured Xenos camera matrix is orthonormal, so mirror Streamline's lightweight
+// row-vector affine inverse here.
+static bool DLSSXenosInvertOrthonormal(
+    const DLSSXenosCameraMatrix& source,
+    DLSSXenosCameraMatrix& result)
+{
+    result = {};
+
+    for (uint32_t row = 0; row < 3; ++row)
+        for (uint32_t column = 0; column < 3; ++column)
+            result.m[row][column] = source.m[column][row];
+
+    result.m[3][0] = -(
+        source.m[3][0] * source.m[0][0] +
+        source.m[3][1] * source.m[0][1] +
+        source.m[3][2] * source.m[0][2]);
+    result.m[3][1] = -(
+        source.m[3][0] * source.m[1][0] +
+        source.m[3][1] * source.m[1][1] +
+        source.m[3][2] * source.m[1][2]);
+    result.m[3][2] = -(
+        source.m[3][0] * source.m[2][0] +
+        source.m[3][1] * source.m[2][1] +
+        source.m[3][2] * source.m[2][2]);
+    result.m[3][3] = 1.0f;
+
+    return DLSSXenosIsFinite(result);
+}
+
 static float DLSSXenosRelativeError(
     const DLSSXenosCameraMatrix& a,
     const DLSSXenosCameraMatrix& b)
@@ -197,7 +230,7 @@ static void DLSSXenosCameraBeginFrame()
 {
     g_dlssXenosCameraValid = false;
     if (!g_dlssGameplayFrame)
-        g_dlssXenosHavePreviousViewProjection = false;
+        g_dlssXenosHavePreviousCamera = false;
 }
 
 static void DLSSXenosCaptureCamera()
@@ -277,38 +310,74 @@ namespace DLSSRenderer
     {
         if (!g_dlssXenosCameraValid)
         {
-            g_dlssXenosHavePreviousViewProjection = false;
+            g_dlssXenosHavePreviousCamera = false;
             SetStatus("waiting for validated Xenos camera constants c76-c91");
             return false;
         }
 
         DLSSXenosCameraMatrix inverseProjection{};
-        DLSSXenosCameraMatrix inverseCurrentViewProjection{};
-        if (!DLSSXenosInvert(g_dlssXenosProjection, inverseProjection) ||
-            !DLSSXenosInvert(g_dlssXenosViewProjection, inverseCurrentViewProjection))
+        if (!DLSSXenosInvert(g_dlssXenosProjection, inverseProjection))
         {
-            g_dlssXenosHavePreviousViewProjection = false;
-            SetStatus("Xenos camera matrix inversion failed");
+            g_dlssXenosHavePreviousCamera = false;
+            SetStatus("Xenos projection matrix inversion failed");
             return false;
         }
 
-        const bool reset = !g_dlssXenosHavePreviousViewProjection;
-        const DLSSXenosCameraMatrix& previousViewProjection = reset
-            ? g_dlssXenosViewProjection
-            : g_dlssXenosPreviousViewProjection;
+        const bool reset = !g_dlssXenosHavePreviousCamera;
+        const DLSSXenosCameraMatrix& previousCameraToWorld = reset
+            ? g_dlssXenosCameraToWorld
+            : g_dlssXenosPreviousCameraToWorld;
+        const DLSSXenosCameraMatrix& previousProjection = reset
+            ? g_dlssXenosProjection
+            : g_dlssXenosPreviousProjection;
 
-        DLSSXenosCameraMatrix inversePreviousViewProjection{};
-        if (!DLSSXenosInvert(previousViewProjection, inversePreviousViewProjection))
+        // Match Streamline's camera-centred reprojection helper. Directly
+        // inverting a full world->clip matrix bakes camera translations in the
+        // thousands (and a ~200 km far plane) into the inversion. Removing the
+        // current camera translation first keeps the temporal transform close to
+        // identity and preserves the small per-frame motion DLSS needs.
+        DLSSXenosCameraMatrix currentCameraToCenteredWorld = g_dlssXenosCameraToWorld;
+        currentCameraToCenteredWorld.m[3][0] = 0.0f;
+        currentCameraToCenteredWorld.m[3][1] = 0.0f;
+        currentCameraToCenteredWorld.m[3][2] = 0.0f;
+        currentCameraToCenteredWorld.m[3][3] = 1.0f;
+
+        DLSSXenosCameraMatrix previousCameraToCenteredWorld = previousCameraToWorld;
+        previousCameraToCenteredWorld.m[3][0] -= g_dlssXenosCameraToWorld.m[3][0];
+        previousCameraToCenteredWorld.m[3][1] -= g_dlssXenosCameraToWorld.m[3][1];
+        previousCameraToCenteredWorld.m[3][2] -= g_dlssXenosCameraToWorld.m[3][2];
+        previousCameraToCenteredWorld.m[3][3] = 1.0f;
+
+        DLSSXenosCameraMatrix centeredWorldToPreviousCamera{};
+        if (!DLSSXenosInvertOrthonormal(
+                previousCameraToCenteredWorld,
+                centeredWorldToPreviousCamera))
         {
-            g_dlssXenosHavePreviousViewProjection = false;
-            SetStatus("previous Xenos camera matrix inversion failed");
+            g_dlssXenosHavePreviousCamera = false;
+            SetStatus("camera-centred Xenos inverse failed");
             return false;
         }
 
+        const DLSSXenosCameraMatrix cameraViewToPreviousCameraView =
+            DLSSXenosMultiply(
+                currentCameraToCenteredWorld,
+                centeredWorldToPreviousCamera);
+        const DLSSXenosCameraMatrix clipToPreviousCameraView =
+            DLSSXenosMultiply(
+                inverseProjection,
+                cameraViewToPreviousCameraView);
         const DLSSXenosCameraMatrix clipToPrevClip =
-            DLSSXenosMultiply(inverseCurrentViewProjection, previousViewProjection);
-        const DLSSXenosCameraMatrix prevClipToClip =
-            DLSSXenosMultiply(inversePreviousViewProjection, g_dlssXenosViewProjection);
+            DLSSXenosMultiply(
+                clipToPreviousCameraView,
+                previousProjection);
+
+        DLSSXenosCameraMatrix prevClipToClip{};
+        if (!DLSSXenosInvert(clipToPrevClip, prevClipToClip))
+        {
+            g_dlssXenosHavePreviousCamera = false;
+            SetStatus("camera-centred temporal matrix inversion failed");
+            return false;
+        }
 
         DLSSXenosCopyToDLSS(temporalData.cameraViewToClip, g_dlssXenosProjection);
         DLSSXenosCopyToDLSS(temporalData.clipToCameraView, inverseProjection);
@@ -354,7 +423,7 @@ namespace DLSSRenderer
             std::fabs(nearDenominator) < 1.0e-7f ||
             std::fabs(farDenominator) < 1.0e-7f)
         {
-            g_dlssXenosHavePreviousViewProjection = false;
+            g_dlssXenosHavePreviousCamera = false;
             SetStatus("Xenos projection coefficients are invalid");
             return false;
         }
@@ -371,7 +440,7 @@ namespace DLSSRenderer
             temporalData.cameraNear <= 0.0f ||
             temporalData.cameraFar <= temporalData.cameraNear)
         {
-            g_dlssXenosHavePreviousViewProjection = false;
+            g_dlssXenosHavePreviousCamera = false;
             SetStatus("Xenos projection parameters are invalid");
             return false;
         }
@@ -381,11 +450,12 @@ namespace DLSSRenderer
         temporalData.resetHistory = reset;
         temporalData.motionVectorsInvalidValue = 0.0f;
 
-        g_dlssXenosPreviousViewProjection = g_dlssXenosViewProjection;
-        g_dlssXenosHavePreviousViewProjection = true;
+        g_dlssXenosPreviousCameraToWorld = g_dlssXenosCameraToWorld;
+        g_dlssXenosPreviousProjection = g_dlssXenosProjection;
+        g_dlssXenosHavePreviousCamera = true;
 
         SetStatus(
-            "Xenos camera c76-c91; near %.2f far %.0f FOV %.1f deg",
+            "Xenos camera-centred temporal; near %.2f far %.0f FOV %.1f deg",
             temporalData.cameraNear,
             temporalData.cameraFar,
             temporalData.cameraFovRadians * 57.2957795f);
