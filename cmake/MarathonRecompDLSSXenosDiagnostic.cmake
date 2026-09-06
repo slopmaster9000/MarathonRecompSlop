@@ -73,6 +73,45 @@ _mr_dlss_xenos_video_replace(
 
 file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_xenos_video}")
 
+# A/B the DLSS insertion point without changing depth, temporal constants, or
+# Streamline camera reconstruction. By default the current late intermediary
+# color remains the scaling input. With MARATHON_DLSS_SCENE_COLOR_INPUT=1, feed
+# the exact guest color texture on which c76-c91 validated instead. This may
+# intentionally bypass later post-processing, but it makes color/depth/camera
+# originate from the same 3D scene pass and therefore isolates insertion-point
+# mismatch from every remaining temporal variable.
+set(_MR_DLSS_GENERATED_RUNTIME_INL "${_MR_DLSS_GENERATED_GPU_DIR}/dlss_video_runtime.inl")
+if(NOT EXISTS "${_MR_DLSS_GENERATED_RUNTIME_INL}")
+    message(FATAL_ERROR "DLSS Xenos scene-color diagnostic ran before generated runtime source was created.")
+endif()
+file(READ "${_MR_DLSS_GENERATED_RUNTIME_INL}" _mr_dlss_scene_runtime)
+
+set(_MR_DLSS_SCENE_COLOR_NEEDLE
+    "    DLSS::FrameResources resources{};\n    resources.inputColor = g_intermediaryBackBufferTexture.get();")
+string(FIND "${_mr_dlss_scene_runtime}" "${_MR_DLSS_SCENE_COLOR_NEEDLE}" _mr_dlss_scene_color_offset)
+if(_mr_dlss_scene_color_offset EQUAL -1)
+    message(FATAL_ERROR "DLSS Xenos scene-color input diagnostic failed; runtime input assignment changed.")
+endif()
+string(REPLACE
+    "${_MR_DLSS_SCENE_COLOR_NEEDLE}"
+    "    const char* sceneColorInputEnvironment = std::getenv(\"MARATHON_DLSS_SCENE_COLOR_INPUT\");\n    const bool requestSceneColorInput =\n        sceneColorInputEnvironment != nullptr &&\n        sceneColorInputEnvironment[0] != 0 &&\n        sceneColorInputEnvironment[0] != '0';\n\n    bool usingSceneColorInput = false;\n    RenderTexture* dlssInputColor = g_intermediaryBackBufferTexture.get();\n    if (requestSceneColorInput &&\n        g_dlssXenosSceneRenderTarget != nullptr &&\n        g_dlssXenosSceneRenderTarget->texture != nullptr &&\n        g_dlssXenosSceneRenderTarget->width == g_dlssRenderWidth &&\n        g_dlssXenosSceneRenderTarget->height == g_dlssRenderHeight)\n    {\n        dlssInputColor = g_dlssXenosSceneRenderTarget->texture;\n        usingSceneColorInput = true;\n    }\n\n    DLSS::FrameResources resources{};\n    resources.inputColor = dlssInputColor;"
+    _mr_dlss_scene_runtime
+    "${_mr_dlss_scene_runtime}")
+
+set(_MR_DLSS_SCENE_COLOR_STATUS_NEEDLE
+    "        useExplicitCameraMotion ? \"explicit camera MVs\" : \"Streamline camera reconstruction\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");")
+string(FIND "${_mr_dlss_scene_runtime}" "${_MR_DLSS_SCENE_COLOR_STATUS_NEEDLE}" _mr_dlss_scene_color_status_offset)
+if(_mr_dlss_scene_color_status_offset EQUAL -1)
+    message(FATAL_ERROR "DLSS Xenos scene-color status diagnostic failed; runtime status changed.")
+endif()
+string(REPLACE
+    "${_MR_DLSS_SCENE_COLOR_STATUS_NEEDLE}"
+    "        useExplicitCameraMotion ? \"explicit camera MVs\" : \"Streamline camera reconstruction\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");\n    if (requestSceneColorInput)\n    {\n        DLSSRenderer::SetStatus(\n            \"Quality %ux%u -> %ux%u; %s; depth %s; color %s; object motion pending\",\n            g_dlssRenderWidth,\n            g_dlssRenderHeight,\n            g_dlssOutputWidth,\n            g_dlssOutputHeight,\n            useExplicitCameraMotion ? \"explicit camera MVs\" : \"Streamline camera reconstruction\",\n            g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\",\n            usingSceneColorInput ? \"Xenos scene\" : \"scene requested but unavailable\");\n    }"
+    _mr_dlss_scene_runtime
+    "${_mr_dlss_scene_runtime}")
+
+file(WRITE "${_MR_DLSS_GENERATED_RUNTIME_INL}" "${_mr_dlss_scene_runtime}")
+
 # Build a generated copy of the Xenos camera helper so it can latch the exact
 # render target on which c76-c91 validated. The quote include in the generated
 # video translation unit resolves this generated copy before the source-tree
