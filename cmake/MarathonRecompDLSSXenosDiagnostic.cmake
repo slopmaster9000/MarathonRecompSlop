@@ -30,6 +30,17 @@ _mr_dlss_xenos_video_replace(
     "#include \"dlss_video_runtime.inl\""
     "namespace DLSSRenderer { static bool BuildTemporalDataFromXenos(DLSS::TemporalData& temporalData); }\n#define BuildTemporalData BuildTemporalDataFromXenos\n#include \"dlss_video_runtime.inl\"\n#undef BuildTemporalData\n#include \"dlss_xenos_camera.inl\"\n#include \"dlss_sync_diagnostic.inl\"\n#include \"dlss_xenos_diagnostic.inl\"")
 
+# Temporal jitter belongs on the 3D scene geometry, not on every full-size
+# post-process/full-screen pass. The sync capture showed 16 color/depth pair
+# changes per gameplay frame; applying the same fractional viewport offset to
+# those later passes repeatedly shifts/resamples already-jittered scene color
+# away from the scene depth used by DLSS. Limit viewport translation to draws
+# with the currently selected scene depth still bound.
+_mr_dlss_xenos_video_replace(
+    "restricting temporal jitter to depth-backed scene passes"
+    "        if (g_renderTarget != nullptr &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight &&\n            g_dlssGameplayFrame)"
+    "        if (g_renderTarget != nullptr &&\n            g_depthStencil != nullptr &&\n            g_depthStencil == g_dlssDepthCandidate &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight &&\n            g_dlssGameplayFrame)")
+
 _mr_dlss_xenos_video_replace(
     "resetting Xenos camera and diagnostic captures at frame begin"
     "    DLSSPrepareFrameResources();\n\n    g_renderTarget = g_backBuffer;"
