@@ -333,7 +333,9 @@ static bool DLSSRunReprojectionErrorDiagnostic(
 
     commandList->barriers(
         RenderBarrierStage::COMPUTE,
-        RenderTextureBarrier(g_dlssReprojectionPreviousTexture.get(), RenderTextureLayout::SHADER_READ),
+        RenderTextureBarrier(g_dlssReprojectionPreviousTexture.get(), RenderTextureLayout::SHADER_READ));
+    commandList->barriers(
+        RenderBarrierStage::COMPUTE,
         RenderTextureBarrier(g_dlssOutputTexture.get(), RenderTextureLayout::GENERAL));
 
     g_dlssReprojectionDescriptorSet->setTexture(
