@@ -61,6 +61,17 @@ macro(_mr_dlss_runtime_inl_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_dlss_runtime_inl "${_mr_dlss_runtime_inl}")
 endmacro()
 
+# Clean control for the hypothesis that Marathon itself becomes unstable when
+# rendered at the reduced Quality-mode extent. MARATHON_DLSS_SPATIAL_CONTROL=1
+# keeps the normal Quality input resolution but skips Streamline/NGX completely;
+# the existing gamma scaler then performs only a bilinear spatial upscale to the
+# output. Pair this with MARATHON_DLSS_DISABLE_JITTER=1 so neither DLSS temporal
+# reconstruction nor our temporal viewport offset participates in the result.
+_mr_dlss_runtime_inl_replace(
+    "adding the reduced-resolution no-DLSS spatial control"
+    "    if (!g_dlssGameplayFrame)\n        return false;\n\n    if (!DLSS::IsAvailable())"
+    "    if (!g_dlssGameplayFrame)\n        return false;\n\n    const char* spatialControlEnvironment = std::getenv(\"MARATHON_DLSS_SPATIAL_CONTROL\");\n    const bool spatialControl =\n        spatialControlEnvironment != nullptr &&\n        spatialControlEnvironment[0] != 0 &&\n        spatialControlEnvironment[0] != '0';\n    if (spatialControl)\n    {\n        DLSSRenderer::SetStatus(\n            \"Spatial control %ux%u -> %ux%u; DLSS skipped\",\n            g_dlssRenderWidth,\n            g_dlssRenderHeight,\n            g_dlssOutputWidth,\n            g_dlssOutputHeight);\n        return false;\n    }\n\n    if (!DLSS::IsAvailable())")
+
 # DLAA intentionally renders at the output resolution. The normal POC early-out
 # interprets a 1:1 input/output extent as a failed optimal-size query, which is
 # correct for upscaling modes but would bypass DLAA entirely. Keep that guard for
