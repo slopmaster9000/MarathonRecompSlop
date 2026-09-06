@@ -154,10 +154,11 @@ string(REPLACE
     "${_mr_dlss_reprojection_runtime}")
 
 # Make the normal F1 line confirm that the controlled reverse-depth production
-# test is actually active, rather than relying on the stale render-state heuristic.
+# test is actually active. The status line lives after temporalData's scope, so
+# re-read the environment here rather than referring to that local variable.
 string(REPLACE
     "g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\""
-    "temporalData.depthInverted ? \"reverse-Z corrected\" : \"forward-Z\""
+    "((std::getenv(\"MARATHON_DLSS_REVERSE_DEPTH_FIX\") != nullptr && std::getenv(\"MARATHON_DLSS_REVERSE_DEPTH_FIX\")[0] != 0 && std::getenv(\"MARATHON_DLSS_REVERSE_DEPTH_FIX\")[0] != '0') ? \"reverse-Z corrected\" : (g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\"))"
     _mr_dlss_reprojection_runtime
     "${_mr_dlss_reprojection_runtime}")
 
