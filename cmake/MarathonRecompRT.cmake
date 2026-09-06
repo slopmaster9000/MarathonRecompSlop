@@ -52,9 +52,9 @@ _mr_rt_video_replace(
     "    DLSSPrepareFrameResources();\n    DLSSXenosCameraBeginFrame();\n    DLSSXenosBeginFrame();\n    RTBeginFrame();\n\n    g_renderTarget = g_backBuffer;")
 
 _mr_rt_video_replace(
-    "capturing indexed Xenos geometry for BLAS construction"
+    "capturing indexed Xenos geometry and CSM light direction"
     "    g_commandLists[g_frame]->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);"
-    "    RTCaptureIndexedDraw(args.primitiveType, args.baseVertexIndex, args.startIndex, args.primCount);\n    g_commandLists[g_frame]->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);")
+    "    // Light constants may be bound by shadow-receiving draws that are not\n    // eligible for the conservative BLAS path (skinned, punch-through, etc).\n    // Observe every indexed draw before RTCaptureIndexedDraw applies its geometry\n    // filters so the frame can still recover the CSM sun direction.\n    RTCaptureLightDirection(g_rtFrames[g_frame]);\n    RTCaptureIndexedDraw(args.primitiveType, args.baseVertexIndex, args.startIndex, args.primCount);\n    g_commandLists[g_frame]->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);")
 
 # D3D12 can build acceleration structures directly from the guest buffers. Mark
 # those buffers as AS build inputs/device-addressable at creation time; the
