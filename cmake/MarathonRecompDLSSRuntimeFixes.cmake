@@ -61,6 +61,16 @@ macro(_mr_dlss_runtime_inl_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_dlss_runtime_inl "${_mr_dlss_runtime_inl}")
 endmacro()
 
+# DLAA intentionally renders at the output resolution. The normal POC early-out
+# interprets a 1:1 input/output extent as a failed optimal-size query, which is
+# correct for upscaling modes but would bypass DLAA entirely. Keep that guard for
+# Quality/Performance modes while allowing Streamline's explicit eDLAA mode to
+# evaluate at native resolution.
+_mr_dlss_runtime_inl_replace(
+    "allowing native-resolution DLAA evaluation"
+    "    if (g_dlssRenderWidth == g_dlssOutputWidth && g_dlssRenderHeight == g_dlssOutputHeight)\n    {\n        DLSSRenderer::SetStatus(\"DLSS optimal render size unavailable; staying native\");\n        return false;\n    }"
+    "    if (DLSSRenderer::kMode != DLSS::Mode::DLAA &&\n        g_dlssRenderWidth == g_dlssOutputWidth &&\n        g_dlssRenderHeight == g_dlssOutputHeight)\n    {\n        DLSSRenderer::SetStatus(\"DLSS optimal render size unavailable; staying native\");\n        return false;\n    }")
+
 # Build 75 showed that the validated Xenos matrices alone did not eliminate the
 # temporal instability. Make Streamline's own camera-motion reconstruction the
 # default so the next build removes our explicit camera-MV shader as a variable.
@@ -74,7 +84,7 @@ _mr_dlss_runtime_inl_replace(
 _mr_dlss_runtime_inl_replace(
     "reporting the selected camera-motion path"
     "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; camera MVs; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");"
-    "    DLSSRenderer::SetStatus(\n        \"Quality %ux%u -> %ux%u; %s; depth %s; object motion pending\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        useExplicitCameraMotion ? \"explicit camera MVs\" : \"Streamline camera reconstruction\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");")
+    "    DLSSRenderer::SetStatus(\n        \"%s %ux%u -> %ux%u; %s; depth %s; object motion pending\",\n        DLSSRenderer::kMode == DLSS::Mode::DLAA ? \"DLAA\" : \"Quality\",\n        g_dlssRenderWidth,\n        g_dlssRenderHeight,\n        g_dlssOutputWidth,\n        g_dlssOutputHeight,\n        useExplicitCameraMotion ? \"explicit camera MVs\" : \"Streamline camera reconstruction\",\n        g_dlssDepthCandidateReverseZ ? \"reverse-Z\" : \"forward-Z\");")
 
 file(WRITE "${_MR_DLSS_GENERATED_RUNTIME_INL}" "${_mr_dlss_runtime_inl}")
 
