@@ -25,21 +25,24 @@ endmacro()
 # dlss_video_runtime.inl contains the frame-evaluation call before the Xenos
 # helper implementation can be included. Forward-declare the replacement and
 # temporarily remap the BuildTemporalData token while compiling that one inl.
+# The scene render target is latched by the generated Xenos camera helper below
+# and is intentionally declared before the runtime/video functions that consult
+# it when deciding which viewport receives temporal jitter.
 _mr_dlss_xenos_video_replace(
     "including the Xenos camera, synchronization, and constant capture helpers"
     "#include \"dlss_video_runtime.inl\""
-    "namespace DLSSRenderer { static bool BuildTemporalDataFromXenos(DLSS::TemporalData& temporalData); }\n#define BuildTemporalData BuildTemporalDataFromXenos\n#include \"dlss_video_runtime.inl\"\n#undef BuildTemporalData\n#include \"dlss_xenos_camera.inl\"\n#include \"dlss_sync_diagnostic.inl\"\n#include \"dlss_xenos_diagnostic.inl\"")
+    "static GuestSurface* g_dlssXenosSceneRenderTarget;\nnamespace DLSSRenderer { static bool BuildTemporalDataFromXenos(DLSS::TemporalData& temporalData); }\n#define BuildTemporalData BuildTemporalDataFromXenos\n#include \"dlss_video_runtime.inl\"\n#undef BuildTemporalData\n#include \"dlss_xenos_camera.inl\"\n#include \"dlss_sync_diagnostic.inl\"\n#include \"dlss_xenos_diagnostic.inl\"")
 
-# Temporal jitter belongs on the 3D scene geometry, not on every full-size
-# post-process/full-screen pass. The sync capture showed 16 color/depth pair
-# changes per gameplay frame; applying the same fractional viewport offset to
-# those later passes repeatedly shifts/resamples already-jittered scene color
-# away from the scene depth used by DLSS. Limit viewport translation to draws
-# with the currently selected scene depth still bound.
+# Release 90 proved that merely requiring a depth buffer was not selective
+# enough: the synchronization capture shows many same-size color targets reusing
+# the chosen depth surface in one frame. Once the validated Xenos camera helper
+# sees the real 3D scene draw, latch that render target and apply the Halton
+# viewport translation only there. Before the first valid capture we retain the
+# old depth-backed fallback so the opening scene draw can still receive jitter.
 _mr_dlss_xenos_video_replace(
-    "restricting temporal jitter to depth-backed scene passes"
+    "restricting temporal jitter to the validated Xenos scene target"
     "        if (g_renderTarget != nullptr &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight &&\n            g_dlssGameplayFrame)"
-    "        if (g_renderTarget != nullptr &&\n            g_depthStencil != nullptr &&\n            g_depthStencil == g_dlssDepthCandidate &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight &&\n            g_dlssGameplayFrame)")
+    "        if (g_renderTarget != nullptr &&\n            g_depthStencil != nullptr &&\n            g_depthStencil == g_dlssDepthCandidate &&\n            (g_dlssXenosSceneRenderTarget == nullptr || g_renderTarget == g_dlssXenosSceneRenderTarget) &&\n            g_renderTarget->width == g_dlssRenderWidth &&\n            g_renderTarget->height == g_dlssRenderHeight &&\n            g_dlssGameplayFrame)")
 
 _mr_dlss_xenos_video_replace(
     "resetting Xenos camera and diagnostic captures at frame begin"
@@ -69,3 +72,39 @@ _mr_dlss_xenos_video_replace(
     "    DLSSSyncBeforeEvaluate();\n    DLSSEvaluateRenderedFrame();\n    DLSSSyncAfterEvaluate();\n    DLSSXenosEndFrame();\n    DLSSSyncEndFrame();\n}")
 
 file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_xenos_video}")
+
+# Build a generated copy of the Xenos camera helper so it can latch the exact
+# render target on which c76-c91 validated. The quote include in the generated
+# video translation unit resolves this generated copy before the source-tree
+# helper, keeping the experiment isolated to MARATHON_RECOMP_DLSS builds.
+set(_MR_DLSS_XENOS_CAMERA_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_xenos_camera.inl")
+set(_MR_DLSS_GENERATED_XENOS_CAMERA "${_MR_DLSS_GENERATED_GPU_DIR}/dlss_xenos_camera.inl")
+file(READ "${_MR_DLSS_XENOS_CAMERA_SOURCE}" _mr_dlss_xenos_camera)
+
+set(_MR_DLSS_XENOS_CAMERA_LATCH_NEEDLE "    g_dlssXenosCameraValid = true;")
+string(FIND "${_mr_dlss_xenos_camera}" "${_MR_DLSS_XENOS_CAMERA_LATCH_NEEDLE}" _mr_dlss_xenos_camera_latch_offset)
+if(_mr_dlss_xenos_camera_latch_offset EQUAL -1)
+    message(FATAL_ERROR "DLSS Xenos scene-target latch failed; camera helper changed.")
+endif()
+string(REPLACE
+    "${_MR_DLSS_XENOS_CAMERA_LATCH_NEEDLE}"
+    "    g_dlssXenosCameraValid = true;\n    g_dlssXenosSceneRenderTarget = g_renderTarget;"
+    _mr_dlss_xenos_camera
+    "${_mr_dlss_xenos_camera}")
+
+# Do not carry a render-target identity across menus/cutscenes into a later
+# gameplay scene. Gameplay frames themselves keep the latch so it is already
+# known before the next frame's first scene viewport is flushed.
+set(_MR_DLSS_XENOS_CAMERA_RESET_NEEDLE
+    "    g_dlssXenosCameraValid = false;\n    if (!g_dlssGameplayFrame)\n        g_dlssXenosHavePreviousCamera = false;")
+string(FIND "${_mr_dlss_xenos_camera}" "${_MR_DLSS_XENOS_CAMERA_RESET_NEEDLE}" _mr_dlss_xenos_camera_reset_offset)
+if(_mr_dlss_xenos_camera_reset_offset EQUAL -1)
+    message(FATAL_ERROR "DLSS Xenos scene-target reset failed; camera helper changed.")
+endif()
+string(REPLACE
+    "${_MR_DLSS_XENOS_CAMERA_RESET_NEEDLE}"
+    "    g_dlssXenosCameraValid = false;\n    if (!g_dlssGameplayFrame)\n    {\n        g_dlssXenosHavePreviousCamera = false;\n        g_dlssXenosSceneRenderTarget = nullptr;\n    }"
+    _mr_dlss_xenos_camera
+    "${_mr_dlss_xenos_camera}")
+
+file(WRITE "${_MR_DLSS_GENERATED_XENOS_CAMERA}" "${_mr_dlss_xenos_camera}")
