@@ -43,6 +43,13 @@ macro(_mr_rt_scene_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_rt_scene "${_mr_rt_scene}")
 endmacro()
 
+# Keep enough provenance to discard geometry from same-size auxiliary passes once
+# DLSS has chosen the final gameplay depth surface for the frame.
+_mr_rt_scene_replace(
+    "tagging RT instances with their source depth surface"
+    "    std::vector<RTBlasResource> blases;\n    std::vector<RenderTopLevelASInstance> instances;\n    std::unique_ptr<RenderBuffer> tlasStorage;"
+    "    std::vector<RTBlasResource> blases;\n    std::vector<RenderTopLevelASInstance> instances;\n    std::vector<GuestSurface*> instanceDepthSurfaces;\n    std::unique_ptr<RenderBuffer> tlasStorage;")
+
 # Reconstruct RT receiver positions using the exact validated camera->world
 # matrix instead of decomposed semantic basis vectors. Sonic's view space is
 # right-handed, and basis reconstruction previously mirrored receiver Z.
@@ -71,13 +78,24 @@ _mr_rt_scene_replace(
     "    constants.debugMask = RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_MASK\", false) ? 1u : 0u;"
     "    constants.debugMask = RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_CAMERA_HITS\", false)\n        ? 2u\n        : (RTEnvironmentEnabled(\"MARATHON_RT_DEBUG_MASK\", false) ? 1u : 0u);")
 
-# Only geometry rendered against the exact main-scene depth surface belongs in
-# the RT scene. Same-resolution reflection/auxiliary passes can otherwise pass
-# the old size/z-write filters while using a different camera transform.
+# Only geometry rendered against the exact current scene-depth candidate is even
+# considered. The final-winner compaction below handles frames with multiple
+# qualifying candidates.
 _mr_rt_scene_replace(
     "restricting TLAS capture to the selected gameplay depth surface"
     "        !RTShaderLooksStatic() ||\n        g_renderTarget == nullptr ||\n        g_renderTarget->width != g_dlssRenderWidth ||\n        g_renderTarget->height != g_dlssRenderHeight ||\n        g_indexBufferView.buffer.ref == nullptr)"
     "        !RTShaderLooksStatic() ||\n        !g_pipelineState.zEnable ||\n        g_renderTarget == nullptr ||\n        g_depthStencil == nullptr ||\n        g_depthStencil != g_dlssDepthCandidate ||\n        g_renderTarget->width != g_dlssRenderWidth ||\n        g_renderTarget->height != g_dlssRenderHeight ||\n        g_indexBufferView.buffer.ref == nullptr)")
+
+_mr_rt_scene_replace(
+    "recording each RT instance depth provenance"
+    "    instance.transform = transform;\n    frame.instances.emplace_back(instance);"
+    "    instance.transform = transform;\n    frame.instances.emplace_back(instance);\n    frame.instanceDepthSurfaces.emplace_back(g_depthStencil);")
+
+_mr_rt_scene_replace(
+    "filtering TLAS instances to the final DLSS depth winner"
+    "static bool RTBuildTlas(RTFrameResources& frame)\n{\n    if (frame.instances.empty())\n        return false;\n\n    // All BLAS writes must be visible before the TLAS reads their addresses."
+    "static bool RTBuildTlas(RTFrameResources& frame)\n{\n    if (frame.instances.empty() || g_dlssDepthCandidate == nullptr)\n        return false;\n\n    if (frame.instanceDepthSurfaces.size() == frame.instances.size())\n    {\n        std::vector<RenderTopLevelASInstance> winningInstances;\n        winningInstances.reserve(frame.instances.size());\n        for (size_t i = 0; i < frame.instances.size(); ++i)\n        {\n            if (frame.instanceDepthSurfaces[i] == g_dlssDepthCandidate)\n                winningInstances.emplace_back(frame.instances[i]);\n        }\n\n        if (winningInstances.empty())\n            return false;\n\n        frame.instances = std::move(winningInstances);\n        for (uint32_t i = 0; i < uint32_t(frame.instances.size()); ++i)\n            frame.instances[i].instanceID = i;\n    }\n\n    // All BLAS writes must be visible before the TLAS reads their addresses."
+    )
 
 _mr_rt_scene_replace(
     "reporting exact RT transform diagnostics"
