@@ -122,6 +122,11 @@ file(WRITE "${_MR_DLSS_GENERATED_CONFIG_CPP}" "${_mr_dlss_options_config_cpp}")
 file(READ "${_MR_DLSS_OPTIONS_MENU_SOURCE}" _mr_dlss_options_menu)
 _mr_dlss_options_replace(
     _mr_dlss_options_menu
+    "making the generated options-menu header include source-root-relative"
+    "#include \"options_menu.h\""
+    "#include <ui/options_menu.h>")
+_mr_dlss_options_replace(
+    _mr_dlss_options_menu
     "adding DLSS to the Video options menu"
     "            DrawOption(rowCount++, &Config::VSync, true);"
     "            DrawOption(rowCount++, &Config::DLSS, true);\n            DrawOption(rowCount++, &Config::VSync, true);")
