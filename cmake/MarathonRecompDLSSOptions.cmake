@@ -150,14 +150,23 @@ set(_MR_DLSS_RENDER_SIZE_NEEDLE [=[    bool GetRenderSize(uint32_t outputWidth, 
     {
         return DLSS::GetOptimalRenderSize(outputWidth, outputHeight, kMode, renderWidth, renderHeight);
     }]=])
-set(_MR_DLSS_RENDER_SIZE_REPLACEMENT [=[    bool IsEnabled()
+set(_MR_DLSS_RENDER_SIZE_REPLACEMENT [=[    static EDLSSMode GetBootDLSSMode()
     {
-        return Config::DLSS.Value != EDLSSMode::Off;
+        // Config::Load() runs before host-device creation. Latch the persisted
+        // value on first renderer use so the restart-required menu setting can
+        // never partially switch internal resolution/resources mid-session.
+        static const EDLSSMode mode = Config::DLSS.Value;
+        return mode;
+    }
+
+    bool IsEnabled()
+    {
+        return GetBootDLSSMode() != EDLSSMode::Off;
     }
 
     DLSS::Mode GetMode()
     {
-        switch (Config::DLSS.Value)
+        switch (GetBootDLSSMode())
         {
         case EDLSSMode::UltraPerformance:
             return DLSS::Mode::UltraPerformance;
@@ -176,7 +185,7 @@ set(_MR_DLSS_RENDER_SIZE_REPLACEMENT [=[    bool IsEnabled()
 
     const char* GetModeName()
     {
-        switch (Config::DLSS.Value)
+        switch (GetBootDLSSMode())
         {
         case EDLSSMode::Off:              return "Off";
         case EDLSSMode::UltraPerformance: return "Ultra Performance";
