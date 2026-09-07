@@ -3,14 +3,17 @@ if(NOT MARATHON_RECOMP_DLSS)
 endif()
 
 # Temporary build-time inspection hook. XenosRecomp generates the game's guest
-# shader cache during the normal build, so dump the known Sonic 06 velocity-map
-# shaders at the point where their Xenos bytecode has already been translated to
-# readable HLSL. This mutates only the checked-out submodule source in the build
-# workspace; the submodule commit itself remains untouched.
+# shader cache during the normal build. Save every translated guest shader as
+# readable HLSL so we can identify Sonic 06's dormant FxVelocityMap shaders even
+# when the hashes referenced by the old PSO precompile code are not present in
+# the current private shader archives.
 set(_MR_DLSS_XENOS_MAIN "${CMAKE_SOURCE_DIR}/tools/XenosRecomp/XenosRecomp/main.cpp")
 if(NOT EXISTS "${_MR_DLSS_XENOS_MAIN}")
     message(FATAL_ERROR "DLSS velocity inspection could not find XenosRecomp/main.cpp")
 endif()
+
+set(_MR_DLSS_VELOCITY_DUMP_DIR "${CMAKE_BINARY_DIR}/dlss-native-shader-dump")
+file(TO_CMAKE_PATH "${_MR_DLSS_VELOCITY_DUMP_DIR}" _MR_DLSS_VELOCITY_DUMP_DIR)
 
 file(READ "${_MR_DLSS_XENOS_MAIN}" _mr_dlss_xenos_main)
 
@@ -25,24 +28,7 @@ string(REPLACE "${_MR_DLSS_INSPECT_SIGNATURE_OLD}" "${_MR_DLSS_INSPECT_SIGNATURE
 set(_MR_DLSS_INSPECT_BODY_OLD [=[    recompiler.recompile(shader.data, include);
 
     shader.specConstantsMask = recompiler.specConstantsMask;]=])
-set(_MR_DLSS_INSPECT_BODY_NEW [=[    recompiler.recompile(shader.data, include);
-
-    // These hashes come from MarathonRecomp's dormant FxVelocityMap pipeline
-    // precompilation code. Print the translated shader and source archive path
-    // so the DLSS integration can consume the native object-velocity semantics
-    // instead of guessing their encoding.
-    if (shaderHash == 0x4620B236DC38100Cull ||
-        shaderHash == 0x99DC3F27E402700Dull ||
-        shaderHash == 0xBBDB735BEACC8F41ull)
-    {
-        static std::mutex dlssVelocityDumpMutex;
-        std::lock_guard lock(dlssVelocityDumpMutex);
-        fmt::println("DLSS_NATIVE_VELOCITY_SHADER_BEGIN hash=0x{:016X} file={}", shaderHash, shaderFilename);
-        fmt::println("{}", recompiler.out);
-        fmt::println("DLSS_NATIVE_VELOCITY_SHADER_END hash=0x{:016X}", shaderHash);
-    }
-
-    shader.specConstantsMask = recompiler.specConstantsMask;]=])
+set(_MR_DLSS_INSPECT_BODY_NEW "    recompiler.recompile(shader.data, include);\n\n    // DLSS diagnostic: persist the translated HLSL for every guest shader.\n    // The source filename is embedded in the file header so the resulting\n    // Actions artifact is self-contained and searchable.\n    {\n        static std::mutex dlssVelocityDumpMutex;\n        std::lock_guard lock(dlssVelocityDumpMutex);\n        const std::filesystem::path dumpRoot = R\"(${_MR_DLSS_VELOCITY_DUMP_DIR})\";\n        std::filesystem::create_directories(dumpRoot);\n        const std::string dumpText = fmt::format(\"// XenosRecomp hash: 0x{:016X}\\n// Source file: {}\\n\\n{}\", shaderHash, shaderFilename, recompiler.out);\n        const std::filesystem::path dumpPath = dumpRoot / fmt::format(\"0x{:016X}.hlsl\", shaderHash);\n        writeAllBytes(dumpPath.string().c_str(), dumpText.data(), dumpText.size());\n\n        if (shaderHash == 0x4620B236DC38100Cull ||\n            shaderHash == 0x99DC3F27E402700Dull ||\n            shaderHash == 0xBBDB735BEACC8F41ull)\n        {\n            fmt::println(\"DLSS_NATIVE_VELOCITY_SHADER_DUMPED hash=0x{:016X} file={} path={}\", shaderHash, shaderFilename, dumpPath.string());\n        }\n    }\n\n    shader.specConstantsMask = recompiler.specConstantsMask;")
 string(FIND "${_mr_dlss_xenos_main}" "${_MR_DLSS_INSPECT_BODY_OLD}" _mr_dlss_velocity_body_pos)
 if(_mr_dlss_velocity_body_pos EQUAL -1)
     message(FATAL_ERROR "DLSS velocity inspection body anchor no longer matches XenosRecomp")
@@ -58,4 +44,4 @@ endif()
 string(REPLACE "${_MR_DLSS_INSPECT_CALL_OLD}" "${_MR_DLSS_INSPECT_CALL_NEW}" _mr_dlss_xenos_main "${_mr_dlss_xenos_main}")
 
 file(WRITE "${_MR_DLSS_XENOS_MAIN}" "${_mr_dlss_xenos_main}")
-message(STATUS "DLSS: enabled native FxVelocityMap shader inspection")
+message(STATUS "DLSS: enabled native shader HLSL dump at ${_MR_DLSS_VELOCITY_DUMP_DIR}")
