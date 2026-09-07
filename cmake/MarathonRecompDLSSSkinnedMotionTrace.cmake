@@ -31,9 +31,15 @@ static bool g_dlssSkinnedMotionManualArmed;
 static bool g_dlssSkinnedMotionArmInitialized;
 static bool g_dlssSkinnedMotionTraceInitialized;
 
+static bool DLSSSkinnedMotionTraceRequested()
+{
+    const char* value = std::getenv("MARATHON_DLSS_SHOW_SKINNED_MOTION");
+    return value != nullptr && value[0] != 0 && value[0] != '0';
+}
+
 static void DLSSSkinnedMotionTrace(const char* format, ...)
 {
-    if (!DLSSSkinnedMotionDebugRequested())
+    if (!DLSSSkinnedMotionTraceRequested())
         return;
 
     FILE* file = std::fopen(
