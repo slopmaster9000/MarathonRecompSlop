@@ -72,4 +72,5 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSReprojectionDiagnostic.cmak
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSReverseDepthDefault.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSOptions.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSOffStandard.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSMenuCompose.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSVelocityInspect.cmake")
