@@ -29,15 +29,17 @@ macro(_mr_dlss_skinned_patch _description _variable _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" ${_variable} "${${_variable}}")
 endmacro()
 
-# Inject the helper at a stable type declaration rather than assuming no other
-# CMake pass has inserted globals between the runtime state and this struct.
+# dlss_video_runtime.inl is included before video.cpp declares its per-frame
+# UploadAllocator. The motion replay now needs that allocator for its dedicated
+# constants, so keep only forward declarations at the early runtime location and
+# inject the implementation later, immediately after g_uploadAllocators exists.
 set(_MR_DLSS_SKINNED_RUNTIME "${_MR_DLSS_GENERATED_GPU_DIR}/dlss_video_runtime.inl")
 file(READ "${_MR_DLSS_SKINNED_RUNTIME}" _mr_dlss_skinned_runtime)
 set(_MR_DLSS_SKINNED_RUNTIME_ANCHOR "struct DLSSMotionConstants")
 set(_MR_DLSS_SKINNED_RUNTIME_REPLACEMENT
-    "#include \"dlss_skinned_history_diagnostic.inl\"\n\nstruct DLSSMotionConstants")
+    "static void DLSSSkinnedHistoryBeginFrame();\nstatic void DLSSRecordSkinnedDraw(uint32_t primitiveType, uint32_t primitiveCount, uint32_t startIndex, int32_t baseVertexIndex);\nstatic const char* DLSSSkinnedHistoryStatus();\nstatic bool DLSSPresentSkinnedMotionDebug();\nstatic bool DLSSSkinnedMotionDebugPresented();\nstatic uint32_t DLSSSkinnedMotionDebugDescriptor();\nstatic RenderTexture* DLSSSkinnedMotionDebugTexture();\n\nstruct DLSSMotionConstants")
 _mr_dlss_skinned_patch(
-    "runtime helper"
+    "runtime diagnostic declarations"
     _mr_dlss_skinned_runtime
     "${_MR_DLSS_SKINNED_RUNTIME_ANCHOR}"
     "${_MR_DLSS_SKINNED_RUNTIME_REPLACEMENT}")
@@ -56,6 +58,16 @@ _mr_dlss_skinned_patch(
 file(WRITE "${_MR_DLSS_SKINNED_RUNTIME}" "${_mr_dlss_skinned_runtime}")
 
 file(READ "${_MR_DLSS_GENERATED_VIDEO}" _mr_dlss_skinned_video)
+
+set(_MR_DLSS_SKINNED_IMPLEMENTATION_ANCHOR
+    "static UploadAllocator g_uploadAllocators[NUM_FRAMES];")
+set(_MR_DLSS_SKINNED_IMPLEMENTATION_REPLACEMENT
+    "${_MR_DLSS_SKINNED_IMPLEMENTATION_ANCHOR}\n\n#include \"dlss_skinned_history_diagnostic.inl\"")
+_mr_dlss_skinned_patch(
+    "late diagnostic implementation"
+    _mr_dlss_skinned_video
+    "${_MR_DLSS_SKINNED_IMPLEMENTATION_ANCHOR}"
+    "${_MR_DLSS_SKINNED_IMPLEMENTATION_REPLACEMENT}")
 
 # These anchors are intentionally single stable lines. Earlier versions matched
 # whole multi-line blocks and broke as soon as another DLSS patch inserted text.
