@@ -41,6 +41,18 @@ _mr_dlss_skinned_patch(
     _mr_dlss_skinned_runtime
     "${_MR_DLSS_SKINNED_RUNTIME_ANCHOR}"
     "${_MR_DLSS_SKINNED_RUNTIME_REPLACEMENT}")
+
+# The debug target is presented through the existing gamma path only when the
+# opt-in visualization actually rendered at least one matched skinned draw.
+set(_MR_DLSS_SKINNED_GAMMA_ANCHOR
+    "    return g_dlssFrameSucceeded\n        ? g_dlssOutputTextureDescriptorIndex\n        : g_intermediaryBackBufferTextureDescriptorIndex;")
+set(_MR_DLSS_SKINNED_GAMMA_REPLACEMENT
+    "    if (DLSSSkinnedMotionDebugPresented())\n        return DLSSSkinnedMotionDebugDescriptor();\n\n${_MR_DLSS_SKINNED_GAMMA_ANCHOR}")
+_mr_dlss_skinned_patch(
+    "gamma debug descriptor"
+    _mr_dlss_skinned_runtime
+    "${_MR_DLSS_SKINNED_GAMMA_ANCHOR}"
+    "${_MR_DLSS_SKINNED_GAMMA_REPLACEMENT}")
 file(WRITE "${_MR_DLSS_SKINNED_RUNTIME}" "${_mr_dlss_skinned_runtime}")
 
 file(READ "${_MR_DLSS_GENERATED_VIDEO}" _mr_dlss_skinned_video)
@@ -76,5 +88,31 @@ _mr_dlss_skinned_patch(
     "${_MR_DLSS_SKINNED_UI_ANCHOR}"
     "${_MR_DLSS_SKINNED_UI_REPLACEMENT}")
 
+# Run the object-motion replay at the same late point where NGX normally sees
+# the finished scene. The normal DLSS path is byte-for-byte unchanged unless
+# MARATHON_DLSS_SHOW_SKINNED_MOTION is set and the replay succeeds.
+set(_MR_DLSS_SKINNED_EVALUATE_ANCHOR
+    "    DLSSEvaluateRenderedFrame();")
+set(_MR_DLSS_SKINNED_EVALUATE_REPLACEMENT
+    "    if (DLSSPresentSkinnedMotionDebug())\n        DLSSRestoreOutputExtent();\n    else\n        DLSSEvaluateRenderedFrame();")
+_mr_dlss_skinned_patch(
+    "late object-motion visualization"
+    _mr_dlss_skinned_video
+    "${_MR_DLSS_SKINNED_EVALUATE_ANCHOR}"
+    "${_MR_DLSS_SKINNED_EVALUATE_REPLACEMENT}")
+
+# MarathonRecompDLSS.cmake already selects between the DLSS output and the
+# intermediary texture for the final gamma barrier. Extend that single source
+# selection with the debug texture without changing the surrounding pass.
+set(_MR_DLSS_SKINNED_BARRIER_ANCHOR
+    "RenderTextureBarrier(g_dlssFrameSucceeded ? g_dlssOutputTexture.get() : g_intermediaryBackBufferTexture.get(), RenderTextureLayout::SHADER_READ)")
+set(_MR_DLSS_SKINNED_BARRIER_REPLACEMENT
+    "RenderTextureBarrier(DLSSSkinnedMotionDebugPresented() ? DLSSSkinnedMotionDebugTexture() : (g_dlssFrameSucceeded ? g_dlssOutputTexture.get() : g_intermediaryBackBufferTexture.get()), RenderTextureLayout::SHADER_READ)")
+_mr_dlss_skinned_patch(
+    "gamma debug texture barrier"
+    _mr_dlss_skinned_video
+    "${_MR_DLSS_SKINNED_BARRIER_ANCHOR}"
+    "${_MR_DLSS_SKINNED_BARRIER_REPLACEMENT}")
+
 file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_dlss_skinned_video}")
-message(STATUS "DLSS: enabled skinned draw history diagnostic (stable anchors)")
+message(STATUS "DLSS: enabled skinned draw history + motion visualization diagnostic")
