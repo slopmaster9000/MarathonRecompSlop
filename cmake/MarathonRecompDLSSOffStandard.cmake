@@ -24,6 +24,19 @@ macro(_mr_dlss_off_video_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_dlss_off_video "${_mr_dlss_off_video}")
 endmacro()
 
+# Config::Load() has already run before Video::CreateHostDevice(), so an Off boot
+# can avoid initializing Streamline entirely. A later menu change is latched and
+# takes effect after restart, at which point this initialization runs normally.
+_mr_dlss_off_video_replace(
+    "skipping Streamline initialization when DLSS is Off"
+    "if (interfaceFunction == CreateD3D12Interface)\n                DLSS::Initialize();"
+    "if (DLSSRenderer::IsEnabled() && interfaceFunction == CreateD3D12Interface)\n                DLSS::Initialize();")
+
+_mr_dlss_off_video_replace(
+    "skipping Streamline device registration when DLSS is Off"
+    "if (g_backend == Backend::D3D12)\n                    DLSS::SetDevice(g_device.get());"
+    "if (DLSSRenderer::IsEnabled() && g_backend == Backend::D3D12)\n                    DLSS::SetDevice(g_device.get());")
+
 _mr_dlss_off_video_replace(
     "restoring the normal host render-target format when DLSS is Off"
     "pipelineDesc.renderTargetFormat[0] = DLSS_SCENE_FORMAT;"
