@@ -86,3 +86,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSSkinnedMotionNoDepthDiagnos
 # RT must run after all DLSS/Xenos generated-source patches.
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRT.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRTShaderCompat.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRTCompatEscapeFix.cmake")
