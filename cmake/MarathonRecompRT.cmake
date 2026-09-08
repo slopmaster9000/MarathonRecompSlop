@@ -114,17 +114,26 @@ macro(_mr_rt_video_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_rt_video "${_mr_rt_video}")
 endmacro()
 
-# The generated DLSS runtime calls RTApplyShadows before rt_scene.inl is included,
-# so provide the internal-linkage declarations before compiling the runtime inl.
+# Keep RT declarations and implementation insertion independent. Newer DLSS
+# diagnostics intentionally add helpers/includes around this region, so matching
+# the entire include block makes RT unnecessarily fragile after a DLSS merge.
 _mr_rt_video_replace(
-    "including the reusable RT scene layer"
-    "namespace DLSSRenderer { static bool BuildTemporalDataFromXenos(DLSS::TemporalData& temporalData); }\n#define BuildTemporalData BuildTemporalDataFromXenos\n#include \"dlss_video_runtime.inl\"\n#undef BuildTemporalData\n#include \"dlss_xenos_camera.inl\"\n#include \"dlss_xenos_diagnostic.inl\""
-    "namespace DLSSRenderer { static bool BuildTemporalDataFromXenos(DLSS::TemporalData& temporalData); }\n#ifdef MARATHON_RECOMP_RT\nstatic bool RTApplyShadows(const DLSS::TemporalData& temporalData, RenderCommandList* commandList, RenderTexture*& inputColor);\nstatic bool RTGammaShadowActive();\nstatic uint32_t RTGammaShadowDescriptor();\n#endif\n#define BuildTemporalData BuildTemporalDataFromXenos\n#include \"dlss_video_runtime.inl\"\n#undef BuildTemporalData\n#include \"dlss_xenos_camera.inl\"\n#include \"dlss_xenos_diagnostic.inl\"\n#include \"rt_scene.inl\"")
+    "declaring the RT runtime bridge"
+    "#define BuildTemporalData BuildTemporalDataFromXenos"
+    "#ifdef MARATHON_RECOMP_RT\nstatic bool RTApplyShadows(const DLSS::TemporalData& temporalData, RenderCommandList* commandList, RenderTexture*& inputColor);\nstatic bool RTGammaShadowActive();\nstatic uint32_t RTGammaShadowDescriptor();\n#endif\n#define BuildTemporalData BuildTemporalDataFromXenos")
 
 _mr_rt_video_replace(
+    "including the reusable RT scene layer"
+    "#include \"dlss_reprojection_diagnostic.inl\""
+    "#include \"dlss_reprojection_diagnostic.inl\"\n#include \"rt_scene.inl\"")
+
+# Use a single stable frame-begin anchor. The merged DLSS branch now inserts
+# synchronization and skinned-history hooks between this call and the Xenos
+# camera reset, so the old multi-line anchor is no longer valid.
+_mr_rt_video_replace(
     "resetting per-frame RT scene resources"
-    "    DLSSPrepareFrameResources();\n    DLSSXenosCameraBeginFrame();\n    DLSSXenosBeginFrame();\n\n    g_renderTarget = g_backBuffer;"
-    "    DLSSPrepareFrameResources();\n    DLSSXenosCameraBeginFrame();\n    DLSSXenosBeginFrame();\n    RTBeginFrame();\n\n    g_renderTarget = g_backBuffer;")
+    "    DLSSPrepareFrameResources();"
+    "    DLSSPrepareFrameResources();\n    RTBeginFrame();")
 
 _mr_rt_video_replace(
     "capturing indexed Xenos geometry and CSM light direction"
@@ -165,10 +174,12 @@ macro(_mr_rt_runtime_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_rt_runtime "${_mr_rt_runtime}")
 endmacro()
 
+# The merged Xenos scene-color path already owns dlssInputColor. Apply RT to
+# that selected input rather than redeclaring it or forcing the intermediary.
 _mr_rt_runtime_replace(
     "feeding ray-traced color into DLSS"
-    "    DLSS::FrameResources resources{};\n    resources.inputColor = g_intermediaryBackBufferTexture.get();"
-    "    RenderTexture* dlssInputColor = g_intermediaryBackBufferTexture.get();\n#ifdef MARATHON_RECOMP_RT\n    RTApplyShadows(temporalData, commandList, dlssInputColor);\n#endif\n\n    DLSS::FrameResources resources{};\n    resources.inputColor = dlssInputColor;")
+    "    DLSS::FrameResources resources{};\n    resources.inputColor = dlssInputColor;"
+    "#ifdef MARATHON_RECOMP_RT\n    RTApplyShadows(temporalData, commandList, dlssInputColor);\n#endif\n\n    DLSS::FrameResources resources{};\n    resources.inputColor = dlssInputColor;")
 
 _mr_rt_runtime_replace(
     "presenting RT shadows when DLSS falls back"
