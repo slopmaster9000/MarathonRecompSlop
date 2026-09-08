@@ -83,3 +83,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSSkinnedMotionTraceEscapeFix
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSSkinnedMotionInputLayoutFix.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSSkinnedMotionNoDepthDiagnostic.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSRigidMotionDiagnostic.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionPerformance.cmake")
