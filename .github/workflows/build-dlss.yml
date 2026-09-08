@@ -161,6 +161,15 @@ jobs:
         shell: pwsh
         run: cmake --build .\out\build\${{ env.CMAKE_PRESET }} --target MarathonRecomp
 
+      - name: Upload translated guest shader dump
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: MarathonRecomp-DLSS-Native-Shader-Dump
+          path: .\out\build\${{ env.CMAKE_PRESET }}\dlss-native-shader-dump
+          if-no-files-found: warn
+          compression-level: 9
+
       - name: Verify Streamline runtime
         shell: pwsh
         run: |

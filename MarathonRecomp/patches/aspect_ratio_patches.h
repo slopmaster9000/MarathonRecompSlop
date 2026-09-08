@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <xxHashMap.h>
 
 #define MAKE_BITFLAG32(bit) 1U << bit
@@ -9,24 +12,149 @@ inline constexpr float NARROW_ASPECT_RATIO = 4.0f / 3.0f;
 inline constexpr float WIDE_ASPECT_RATIO = 16.0f / 9.0f;
 inline constexpr float STEAM_DECK_ASPECT_RATIO = 16.0f / 10.0f;
 
-inline float g_aspectRatio;
+struct AspectRatioMetrics
+{
+    float aspectRatio{};
+    float offsetX{};
+    float offsetY{};
+    float multiplayerOffsetX{};
+    float scale{};
+    float gameplayScale{ 1.0f };
+    float narrowScale{};
+    float narrowMargin{};
+    float horzCentre{};
+    float vertCentre{};
+    float radarMapScale{};
+};
+
+enum class AspectRatioContext : uint8_t
+{
+    Guest,
+    Host
+};
+
+inline AspectRatioMetrics g_hostAspectMetrics{};
+inline AspectRatioMetrics g_guestAspectMetrics{};
+inline thread_local AspectRatioContext g_aspectRatioContext = AspectRatioContext::Guest;
+
+inline AspectRatioMetrics& GetActiveAspectRatioMetrics()
+{
+    return g_aspectRatioContext == AspectRatioContext::Host
+        ? g_hostAspectMetrics
+        : g_guestAspectMetrics;
+}
+
+// Existing game/UI code keeps using the original names. They now resolve to the
+// metric set selected for the calling thread, so host ImGui and guest CSD can
+// use different extents without racing over one process-wide set of floats.
+#define g_aspectRatio (GetActiveAspectRatioMetrics().aspectRatio)
+#define g_aspectRatioOffsetX (GetActiveAspectRatioMetrics().offsetX)
+#define g_aspectRatioOffsetY (GetActiveAspectRatioMetrics().offsetY)
+#define g_aspectRatioMultiplayerOffsetX (GetActiveAspectRatioMetrics().multiplayerOffsetX)
+#define g_aspectRatioScale (GetActiveAspectRatioMetrics().scale)
+#define g_aspectRatioGameplayScale (GetActiveAspectRatioMetrics().gameplayScale)
+#define g_aspectRatioNarrowScale (GetActiveAspectRatioMetrics().narrowScale)
+#define g_aspectRatioNarrowMargin (GetActiveAspectRatioMetrics().narrowMargin)
+#define g_horzCentre (GetActiveAspectRatioMetrics().horzCentre)
+#define g_vertCentre (GetActiveAspectRatioMetrics().vertCentre)
+#define g_radarMapScale (GetActiveAspectRatioMetrics().radarMapScale)
+
+// Movie aspect handling is independent of the viewport metric set.
 inline float g_aspectRatioMovie;
-inline float g_aspectRatioOffsetX;
-inline float g_aspectRatioOffsetY;
-inline float g_aspectRatioMultiplayerOffsetX;
-inline float g_aspectRatioScale;
-inline float g_aspectRatioGameplayScale;
-inline float g_aspectRatioNarrowScale;
-inline float g_aspectRatioNarrowMargin;
-inline float g_horzCentre;
-inline float g_vertCentre;
-inline float g_radarMapScale;
 
 class AspectRatioPatches
 {
 public:
     static void Init();
     static void ComputeOffsets();
+
+    static AspectRatioMetrics ComputeMetrics(uint32_t width, uint32_t height)
+    {
+        AspectRatioMetrics metrics{};
+        if (width == 0 || height == 0)
+            return metrics;
+
+        const float floatWidth = float(width);
+        const float floatHeight = float(height);
+        metrics.aspectRatio = floatWidth / floatHeight;
+        metrics.gameplayScale = 1.0f;
+
+        auto computeScale = [](float aspectRatio)
+        {
+            const float scaled = (aspectRatio * 720.0f) / 1280.0f;
+            return scaled / std::sqrt(scaled);
+        };
+
+        if (metrics.aspectRatio >= NARROW_ASPECT_RATIO)
+        {
+            metrics.offsetX = (floatWidth - floatHeight * WIDE_ASPECT_RATIO) / 2.0f;
+            metrics.offsetY = 0.0f;
+            metrics.scale = floatHeight / 720.0f;
+
+            if (metrics.aspectRatio < WIDE_ASPECT_RATIO)
+            {
+                const float steamDeckScale = metrics.aspectRatio / WIDE_ASPECT_RATIO;
+                const float narrowReferenceScale = computeScale(NARROW_ASPECT_RATIO);
+                const float lerpFactor = std::clamp(
+                    (metrics.aspectRatio - NARROW_ASPECT_RATIO) /
+                        (STEAM_DECK_ASPECT_RATIO - NARROW_ASPECT_RATIO),
+                    0.0f,
+                    1.0f);
+
+                metrics.gameplayScale =
+                    narrowReferenceScale +
+                    (steamDeckScale - narrowReferenceScale) * lerpFactor;
+            }
+        }
+        else
+        {
+            metrics.offsetX =
+                (floatWidth - floatWidth * NARROW_ASPECT_RATIO) / 2.0f;
+            metrics.offsetY =
+                (floatHeight - floatWidth / NARROW_ASPECT_RATIO) / 2.0f;
+            metrics.scale = floatWidth / 960.0f;
+            metrics.gameplayScale = computeScale(NARROW_ASPECT_RATIO);
+        }
+
+        metrics.multiplayerOffsetX = metrics.offsetX / 2.0f;
+        metrics.narrowScale = std::clamp(
+            (metrics.aspectRatio - NARROW_ASPECT_RATIO) /
+                (WIDE_ASPECT_RATIO - NARROW_ASPECT_RATIO),
+            0.0f,
+            1.0f);
+        metrics.narrowMargin = std::lerp(50.0f, 0.0f, metrics.narrowScale);
+        metrics.horzCentre =
+            metrics.offsetX +
+            640.0f * (1.0f - metrics.gameplayScale) * metrics.scale;
+        metrics.vertCentre =
+            metrics.offsetY +
+            360.0f * (1.0f - metrics.gameplayScale) * metrics.scale;
+        metrics.radarMapScale =
+            256.0f * metrics.scale * metrics.gameplayScale;
+        return metrics;
+    }
+
+    static void ComputeOffsets(
+        uint32_t width,
+        uint32_t height,
+        AspectRatioContext context)
+    {
+        AspectRatioMetrics metrics = ComputeMetrics(width, height);
+        if (context == AspectRatioContext::Host)
+            g_hostAspectMetrics = metrics;
+        else
+            g_guestAspectMetrics = metrics;
+    }
+
+    static void SetAspectRatioContext(AspectRatioContext context)
+    {
+        g_aspectRatioContext = context;
+    }
+
+    static AspectRatioContext GetAspectRatioContext()
+    {
+        return g_aspectRatioContext;
+    }
 };
 
 // -------------- CSD MODIFIERS --------------- //
