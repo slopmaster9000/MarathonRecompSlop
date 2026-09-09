@@ -87,3 +87,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSSkinnedMotionNoDepthDiagnos
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRT.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRTShaderCompat.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRTCompatEscapeFix.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompRTCaptureDiagnostic.cmake")
