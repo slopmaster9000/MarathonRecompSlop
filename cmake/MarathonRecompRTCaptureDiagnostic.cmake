@@ -21,9 +21,10 @@ macro(_mr_rt_capture_replace _description _needle _replacement)
     string(REPLACE "${_needle}" "${_replacement}" _mr_rt_capture_scene "${_mr_rt_capture_scene}")
 endmacro()
 
-# These are authored by patches/video_patches.cpp and already describe the
-# guest renderer's named render blocks/FBOs. Use them instead of inferring the
-# main pass from surface dimensions.
+# These are authored by patches/video_patches.cpp on the guest/main thread.
+# They are intentionally only sampled while a draw command is being enqueued;
+# by the time ProcDrawIndexedPrimitive executes on the render thread the guest
+# block has often ended and the globals have already been cleared/changed.
 _mr_rt_capture_replace(
     "declaring guest render-pass classification state"
     "#if defined(MARATHON_RECOMP_RT) && defined(MARATHON_RECOMP_D3D12)"
@@ -32,30 +33,30 @@ _mr_rt_capture_replace(
 _mr_rt_capture_replace(
     "adding capture-only counters"
     "    uint32_t duplicateBlasUses = 0;"
-    "    uint32_t duplicateBlasUses = 0;\n    uint32_t captureDraws = 0;\n    uint32_t captureWorldDraws = 0;\n    uint32_t captureShadowmapDraws = 0;\n    uint32_t captureOtherDraws = 0;\n    uint32_t captureCompatibleMatW = 0;\n    uint32_t captureSolvedTransforms = 0;\n    uint32_t captureFailedTransforms = 0;\n    char captureLastFbo[32]{};\n    char captureLastBlock[32]{};")
+    "    uint32_t duplicateBlasUses = 0;\n    uint32_t captureDraws = 0;\n    uint32_t captureWorldDraws = 0;\n    uint32_t captureShadowmapDraws = 0;\n    uint32_t captureOtherDraws = 0;\n    uint32_t captureBlockActiveDraws = 0;\n    uint32_t captureCompatibleMatW = 0;\n    uint32_t captureSolvedTransforms = 0;\n    uint32_t captureFailedTransforms = 0;\n    uint32_t captureLastPassClass = 0;")
+
+# Extend the generated-only capture helper so the pass identity captured on the
+# guest/main thread travels with the draw command to the render thread.
+_mr_rt_capture_replace(
+    "accepting queued pass classification"
+    "static void RTCaptureIndexedDraw(\n    uint32_t primitiveType,\n    int32_t baseVertexIndex,\n    uint32_t startIndex,\n    uint32_t indexCount)"
+    "static void RTCaptureIndexedDraw(\n    uint32_t primitiveType,\n    int32_t baseVertexIndex,\n    uint32_t startIndex,\n    uint32_t indexCount,\n    uint32_t queuedPassClass,\n    bool queuedBlockActive)")
 
 set(_MR_RT_CAPTURE_ONLY_BLOCK [=[
     if (RTEnvironmentEnabled("MARATHON_RT_CAPTURE_ONLY", false))
     {
         ++frame.captureDraws;
+        frame.captureLastPassClass = queuedPassClass;
 
-        if (g_renderWorldFBO == "world")
+        if (queuedPassClass == 1)
             ++frame.captureWorldDraws;
-        else if (g_renderWorldFBO == "shadowmap")
+        else if (queuedPassClass == 2)
             ++frame.captureShadowmapDraws;
         else
             ++frame.captureOtherDraws;
 
-        std::snprintf(
-            frame.captureLastFbo,
-            sizeof(frame.captureLastFbo),
-            "%s",
-            g_renderWorldFBO.empty() ? "<empty>" : g_renderWorldFBO.c_str());
-        std::snprintf(
-            frame.captureLastBlock,
-            sizeof(frame.captureLastBlock),
-            "%s",
-            g_pBlockName != nullptr ? g_pBlockName : "<none>");
+        if (queuedBlockActive)
+            ++frame.captureBlockActiveDraws;
 
         // Do not claim the transform is solved here. This only measures whether
         // the currently-audited c64-c66 MatW layout decodes to a finite affine
@@ -86,17 +87,20 @@ _mr_rt_capture_replace(
 set(_MR_RT_CAPTURE_STATUS_BLOCK [=[
     if (RTEnvironmentEnabled("MARATHON_RT_CAPTURE_ONLY", false))
     {
+        const char* lastPass =
+            frame.captureLastPassClass == 1 ? "world" :
+            frame.captureLastPassClass == 2 ? "shadow" : "other";
         RTSetStatus(
-            "CAPTURE ONLY draws=%u world=%u shadow=%u other=%u matW=%u candidate=%u failed=%u fbo=%s block=%s",
+            "CAPTURE ONLY draws=%u world=%u shadow=%u other=%u blockActive=%u matW=%u candidate=%u failed=%u last=%s",
             frame.captureDraws,
             frame.captureWorldDraws,
             frame.captureShadowmapDraws,
             frame.captureOtherDraws,
+            frame.captureBlockActiveDraws,
             frame.captureCompatibleMatW,
             frame.captureSolvedTransforms,
             frame.captureFailedTransforms,
-            frame.captureLastFbo[0] != 0 ? frame.captureLastFbo : "<none>",
-            frame.captureLastBlock[0] != 0 ? frame.captureLastBlock : "<none>");
+            lastPass);
         return false;
     }
 
@@ -108,4 +112,34 @@ _mr_rt_capture_replace(
     "    RTFrameResources& frame = g_rtFrames[g_frame];\n${_MR_RT_CAPTURE_STATUS_BLOCK}    if (frame.instances.empty())")
 
 file(WRITE "${_MR_RT_GENERATED_SCENE}" "${_mr_rt_capture_scene}")
-message(STATUS "MarathonRecomp SlopT safe RT capture-only diagnostic enabled")
+
+# Patch the generated video command stream itself. Render commands are queued on
+# the guest/main thread and consumed later on the render thread. Snapshot the
+# guest pass classification into DrawIndexedPrimitive while it is still valid.
+file(READ "${_MR_DLSS_GENERATED_VIDEO}" _mr_rt_capture_video)
+
+macro(_mr_rt_capture_video_replace _description _needle _replacement)
+    string(FIND "${_mr_rt_capture_video}" "${_needle}" _mr_rt_capture_video_offset)
+    if(_mr_rt_capture_video_offset EQUAL -1)
+        message(FATAL_ERROR "RT capture command patch failed while ${_description}; generated video source changed.")
+    endif()
+    string(REPLACE "${_needle}" "${_replacement}" _mr_rt_capture_video "${_mr_rt_capture_video}")
+endmacro()
+
+_mr_rt_capture_video_replace(
+    "adding pass identity to indexed render commands"
+    "            uint32_t startIndex;\n            uint32_t primCount;\n        } drawIndexedPrimitive;"
+    "            uint32_t startIndex;\n            uint32_t primCount;\n            uint8_t rtPassClass;\n            uint8_t rtBlockActive;\n            uint16_t rtReserved;\n        } drawIndexedPrimitive;")
+
+_mr_rt_capture_video_replace(
+    "snapshotting guest pass state when indexed draws are enqueued"
+    "    cmd.drawIndexedPrimitive.primCount = primCount;\n\n    queue.submit();"
+    "    cmd.drawIndexedPrimitive.primCount = primCount;\n    cmd.drawIndexedPrimitive.rtPassClass =\n        g_renderWorldFBO == \"world\" ? 1u :\n        (g_renderWorldFBO == \"shadowmap\" ? 2u : 0u);\n    cmd.drawIndexedPrimitive.rtBlockActive = g_pBlockName != nullptr ? 1u : 0u;\n    cmd.drawIndexedPrimitive.rtReserved = 0;\n\n    queue.submit();")
+
+_mr_rt_capture_video_replace(
+    "forwarding queued pass state into RT capture"
+    "    RTCaptureIndexedDraw(args.primitiveType, args.baseVertexIndex, args.startIndex, args.primCount);"
+    "    RTCaptureIndexedDraw(\n        args.primitiveType,\n        args.baseVertexIndex,\n        args.startIndex,\n        args.primCount,\n        args.rtPassClass,\n        args.rtBlockActive != 0);")
+
+file(WRITE "${_MR_DLSS_GENERATED_VIDEO}" "${_mr_rt_capture_video}")
+message(STATUS "MarathonRecomp SlopT safe RT capture-only diagnostic enabled with queued pass tags")
