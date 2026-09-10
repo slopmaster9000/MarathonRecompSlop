@@ -51,8 +51,10 @@ else()
     set(_MR_VR_GENERATED_GPU_DIR "${_MR_VR_GENERATED_DIR}/gpu")
 endif()
 
+set(_MR_VR_RUNTIME_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/vr/vr_runtime.cpp")
 set(_MR_VR_GENERATED_VIDEO "${_MR_VR_GENERATED_GPU_DIR}/video_vr.cpp")
 set(_MR_VR_GENERATED_APP "${_MR_VR_GENERATED_DIR}/app_vr.cpp")
+set(_MR_VR_GENERATED_RUNTIME "${_MR_VR_GENERATED_DIR}/vr_runtime_vr.cpp")
 
 file(READ "${_MR_VR_VIDEO_SOURCE}" _mr_vr_video)
 
@@ -126,9 +128,49 @@ _mr_vr_app_replace(
     "    LOG_UTILITY(\"RenderFrame\");\n\n    __imp__sub_82744840(ctx, base);"
     "    LOG_UTILITY(\"RenderFrame\");\n\n#ifdef MARATHON_RECOMP_VR\n    VR::ApplyLatestHeadPose();\n#endif\n\n    __imp__sub_82744840(ctx, base);")
 
+# Keep the source implementation readable while generating the exact build copy
+# here. The D3D12 state correction follows XR_KHR_D3D12_enable: acquired color
+# swapchain images enter application ownership in RENDER_TARGET state and must be
+# returned to that state before xrReleaseSwapchainImage.
+file(READ "${_MR_VR_RUNTIME_SOURCE}" _mr_vr_runtime)
+
+macro(_mr_vr_runtime_replace _description _needle _replacement)
+    string(FIND "${_mr_vr_runtime}" "${_needle}" _mr_vr_runtime_offset)
+    if(_mr_vr_runtime_offset EQUAL -1)
+        message(FATAL_ERROR "SlopVR runtime patch failed while ${_description}; vr_runtime.cpp changed.")
+    endif()
+    string(REPLACE "${_needle}" "${_replacement}" _mr_vr_runtime "${_mr_vr_runtime}")
+endmacro()
+
+_mr_vr_runtime_replace(
+    "fixing the generated runtime header include"
+    "#include \"vr_runtime.h\""
+    "#include <vr/vr_runtime.h>")
+
+_mr_vr_runtime_replace(
+    "making the cross-thread session flag atomic"
+    "#include <algorithm>\n"
+    "#include <algorithm>\n#include <atomic>\n")
+
+_mr_vr_runtime_replace(
+    "making the cross-thread session state atomic"
+    "        bool g_sessionRunning = false;"
+    "        std::atomic<bool> g_sessionRunning = false;")
+
+_mr_vr_runtime_replace(
+    "using the OpenXR-defined D3D12 color swapchain state"
+    "            barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;"
+    "            barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;")
+
+_mr_vr_runtime_replace(
+    "synchronizing the applied-view reset"
+    "                            g_sessionRunning = true;\n                            g_haveOrigin = false;\n                            g_haveAppliedViews = false;\n                            SetStatus(\"OpenXR session running; waiting for first tracked frame\");"
+    "                            g_sessionRunning = true;\n                            g_haveOrigin = false;\n                            {\n                                std::lock_guard lock(g_poseMutex);\n                                g_haveAppliedViews = false;\n                                g_latestPose = {};\n                            }\n                            SetStatus(\"OpenXR session running; waiting for first tracked frame\");")
+
 file(MAKE_DIRECTORY "${_MR_VR_GENERATED_GPU_DIR}")
 file(WRITE "${_MR_VR_GENERATED_VIDEO}" "${_mr_vr_video}")
 file(WRITE "${_MR_VR_GENERATED_APP}" "${_mr_vr_app}")
+file(WRITE "${_MR_VR_GENERATED_RUNTIME}" "${_mr_vr_runtime}")
 
 # Replace whichever app/video sources are currently active (vanilla or the final
 # DLSS-generated variants) without changing the normal source tree in-place.
@@ -139,7 +181,7 @@ set_source_files_properties(
     PROPERTIES HEADER_FILE_ONLY TRUE)
 
 target_sources(MarathonRecomp PRIVATE
-    "${CMAKE_SOURCE_DIR}/MarathonRecomp/vr/vr_runtime.cpp"
+    "${_MR_VR_GENERATED_RUNTIME}"
     "${_MR_VR_GENERATED_VIDEO}"
     "${_MR_VR_GENERATED_APP}")
 
