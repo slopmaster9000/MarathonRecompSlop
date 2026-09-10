@@ -18,22 +18,22 @@ namespace VR
     // OpenXR must use the same D3D12 device and direct queue as MarathonRecomp.
     bool SetD3D12Backend(plume::RenderDevice* device, plume::RenderCommandQueue* queue);
 
-    // Immersive mode renders the guest twice. These calls temporarily replace
-    // Sonic 06's gameplay camera with one OpenXR eye, then restore it so normal
-    // gamepad camera behavior remains authoritative underneath head tracking.
-    bool ShouldRenderImmersiveStereo();
+    // Both VR modes are true stereo scene renders. Virtual Screen applies only
+    // eye/head translation and an off-axis portal projection through a fixed
+    // plane. Immersive 360 applies the full eye pose and OpenXR per-eye FOV.
+    bool ShouldRenderStereoScene();
     bool ApplyEyePose(uint32_t eye);
     void RestoreGameCamera();
 
-    // Implemented in the VR-generated video.cpp. The command is inserted into
-    // MarathonRecomp's render queue exactly between the left and right guest
-    // passes so the first eye cannot be overwritten by the second.
+    // Implemented in the VR-generated video.cpp. CaptureEye inserts a renderer
+    // command exactly between the left and right guest passes; MarkEyeCaptured
+    // is called only after that render-thread capture succeeds.
     void CaptureEye(uint32_t eye);
     void MarkEyeCaptured(uint32_t eye);
 
     // Called after the Plume command list has been submitted. Virtual Screen
-    // consumes desktopSource as an OpenXR quad. Immersive 360 consumes the two
-    // gamma-corrected eye captures as a projection layer.
+    // presents the two captures as eye-specific quad layers. Immersive 360 uses
+    // them as a two-slice stereo projection layer.
     void SubmitFrame(
         plume::RenderTexture* desktopSource,
         plume::RenderTexture* leftEyeSource,
