@@ -87,3 +87,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionPerformance.cma
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionIntegration.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionLazyRigidFix.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionDefault.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGeneration.cmake")
