@@ -87,3 +87,7 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionPerformance.cma
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionIntegration.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionLazyRigidFix.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionDefault.cmake")
+
+# VR is deliberately last: it layers on top of either the vanilla renderer or
+# the final DLSS-generated renderer sources.
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVR.cmake")
