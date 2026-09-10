@@ -1,0 +1,130 @@
+name: Apply Soft Shadow V2 Source
+
+on:
+  push:
+    branches:
+      - shadow-softness
+    paths:
+      - .github/workflows/apply-soft-shadow-v2-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: shadow-softness
+          fetch-depth: 0
+      - name: Patch source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new):
+              p = Path(path)
+              s = p.read_text(encoding='utf-8')
+              if old not in s:
+                  raise RuntimeError(f'needle missing in {path}: {old[:100]!r}')
+              p.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          rep('MarathonRecomp/user/config.h',
+          '''enum class EReflectionResolution : int32_t
+          {''',
+          '''enum class EShadowSoftness : int32_t
+          {
+              Original,
+              Low,
+              Medium,
+              High
+          };
+
+          enum class EReflectionResolution : int32_t
+          {''')
+
+          rep('MarathonRecomp/user/config_def.h',
+              'CONFIG_DEFINE_LOCALISED("Video", int32_t, ShadowSoftness, 1, false);',
+              'CONFIG_DEFINE_ENUM_LOCALISED("Video", EShadowSoftness, ShadowSoftness, EShadowSoftness::Original, false);')
+
+          rep('MarathonRecomp/user/config.cpp',
+          '''CONFIG_DEFINE_ENUM_TEMPLATE(EReflectionResolution)
+          {''',
+          '''CONFIG_DEFINE_ENUM_TEMPLATE(EShadowSoftness)
+          {
+              { "Original", EShadowSoftness::Original },
+              { "Low",      EShadowSoftness::Low },
+              { "Medium",   EShadowSoftness::Medium },
+              { "High",     EShadowSoftness::High }
+          };
+
+          CONFIG_DEFINE_ENUM_TEMPLATE(EReflectionResolution)
+          {''')
+
+          locale = Path('MarathonRecomp/locale/config_locale.cpp')
+          s = locale.read_text(encoding='utf-8')
+          start = s.index('CONFIG_DEFINE_LOCALE(ShadowSoftness)')
+          end = s.index('CONFIG_DEFINE_LOCALE(ReflectionResolution)', start)
+          new_locale = '''CONFIG_DEFINE_LOCALE(ShadowSoftness)
+          {
+              { ELanguage::English,  { "Shadow Softness", "Choose the filtering quality and width of real-time shadow edges." } },
+              { ELanguage::Japanese, { "影の柔らかさ", "リアルタイムの影の輪郭のフィルター品質と幅を設定します" } },
+              { ELanguage::German,   { "Schattenweichheit", "Wähle Qualität und Breite der Filterung von Echtzeit-Schattenkanten." } },
+              { ELanguage::French,   { "Douceur des ombres", "Choisissez la qualité et la largeur du filtrage des contours d'ombres en temps réel." } },
+              { ELanguage::Spanish,  { "Suavidad de sombras", "Elige la calidad y amplitud del filtrado de los bordes de sombras en tiempo real." } },
+              { ELanguage::Italian,  { "Morbidezza ombre", "Scegli la qualità e l'ampiezza del filtro dei bordi delle ombre in tempo reale." } }
+          };
+
+          CONFIG_DEFINE_ENUM_LOCALE(EShadowSoftness)
+          {
+              {
+                  ELanguage::English,
+                  {
+                      { EShadowSoftness::Original, { "Original", "Use Sonic '06's original four-sample shadow filtering." } },
+                      { EShadowSoftness::Low,      { "Low",      "Use a narrow 3x3 percentage-closer filter." } },
+                      { EShadowSoftness::Medium,   { "Medium",   "Use a wider 3x3 percentage-closer filter." } },
+                      { EShadowSoftness::High,     { "High",     "Use a wide 5x5 percentage-closer filter." } }
+                  }
+              }
+          };
+
+          '''
+          locale.write_text(s[:start] + new_locale + s[end:], encoding='utf-8')
+
+          rep('MarathonRecomp/ui/options_menu.cpp',
+              'DrawOption(rowCount++, &Config::ShadowSoftness, true, nullptr, 1, 2, 4, false);',
+              'DrawOption(rowCount++, &Config::ShadowSoftness, true);')
+
+          rep('MarathonRecomp/gpu/video.cpp',
+          '''    // Sonic 06 uses Texture2DArray fetches exclusively for its CSM shadow map.
+              // Scale the native four-tap PCF kernel live from the graphics-menu setting.
+              SetDirtyValue(g_dirtyStates.sharedConstants, g_sharedConstants.shadowSoftness,
+                  float(std::clamp(Config::ShadowSoftness.Value, 1, 4)));
+          ''',
+          '''    // Runtime encoding intentionally remains 1..4 because the Marathon shader
+              // common uses 1.0 as the exact-original fallback for any untransformed CSM fetch.
+              // Original=1, Low=2, Medium=3, High=4.
+              SetDirtyValue(g_dirtyStates.sharedConstants, g_sharedConstants.shadowSoftness,
+                  float(uint32_t(Config::ShadowSoftness.Value) + 1u));
+          ''')
+
+          rep('MarathonRecompLib/CMakeLists.txt',
+          '''set(XENOS_RECOMP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shader/marathon_shader_common.h")
+
+          target_compile_definitions(XenosRecomp PRIVATE''',
+          '''set(XENOS_RECOMP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shader/marathon_shader_common.h")
+
+          include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompSoftShadows.cmake")
+
+          target_compile_definitions(XenosRecomp PRIVATE''')
+
+          print('Soft-shadow v2 source plumbing patched.')
+          PY
+
+          git config user.name "slopmaster9000"
+          git config user.email "jogn48w@gmail.com"
+          git add MarathonRecomp/user/config.h MarathonRecomp/user/config_def.h MarathonRecomp/user/config.cpp MarathonRecomp/locale/config_locale.cpp MarathonRecomp/ui/options_menu.cpp MarathonRecomp/gpu/video.cpp MarathonRecompLib/CMakeLists.txt
+          git commit -m "Implement true runtime PCF soft shadows"
+          git push origin HEAD:shadow-softness
