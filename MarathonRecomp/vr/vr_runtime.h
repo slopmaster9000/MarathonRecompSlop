@@ -2,9 +2,6 @@
 
 #include <cstdint>
 
-// openxr_platform.h expects the native D3D12/Win32 types to already be known.
-// Pull Plume's D3D12 declarations in first for VR builds so it uses the same
-// DirectX-Headers/Agility SDK selection as the renderer.
 #if defined(MARATHON_RECOMP_VR) && defined(MARATHON_RECOMP_D3D12) && defined(_WIN32)
 #include <plume_d3d12.h>
 #else
@@ -18,18 +15,31 @@ namespace plume
 
 namespace VR
 {
-    // Called after MarathonRecomp has created its native D3D12 device and direct
-    // command queue. OpenXR must use the same objects as the renderer.
+    // OpenXR must use the same D3D12 device and direct queue as MarathonRecomp.
     bool SetD3D12Backend(plume::RenderDevice* device, plume::RenderCommandQueue* queue);
 
-    // Applies the most recently predicted headset orientation to the gameplay
-    // camera. This deliberately does not touch controller/gamepad input.
-    void ApplyLatestHeadPose();
+    // Immersive mode renders the guest twice. These calls temporarily replace
+    // Sonic 06's gameplay camera with one OpenXR eye, then restore it so normal
+    // gamepad camera behavior remains authoritative underneath head tracking.
+    bool ShouldRenderImmersiveStereo();
+    bool ApplyEyePose(uint32_t eye);
+    void RestoreGameCamera();
 
-    // Runs one OpenXR frame on the render thread, mirrors the final desktop
-    // image into both eye images, and publishes a fresh pose for the next game
-    // frame. A null source still services the OpenXR session with an empty frame.
-    void SubmitFrame(plume::RenderTexture* source, uint32_t width, uint32_t height);
+    // Implemented in the VR-generated video.cpp. The command is inserted into
+    // MarathonRecomp's render queue exactly between the left and right guest
+    // passes so the first eye cannot be overwritten by the second.
+    void CaptureEye(uint32_t eye);
+    void MarkEyeCaptured(uint32_t eye);
+
+    // Called after the Plume command list has been submitted. Virtual Screen
+    // consumes desktopSource as an OpenXR quad. Immersive 360 consumes the two
+    // gamma-corrected eye captures as a projection layer.
+    void SubmitFrame(
+        plume::RenderTexture* desktopSource,
+        plume::RenderTexture* leftEyeSource,
+        plume::RenderTexture* rightEyeSource,
+        uint32_t desktopWidth,
+        uint32_t desktopHeight);
 
     void Shutdown();
     bool IsEnabled();
