@@ -69,6 +69,7 @@ CONFIG_DEFINE_ENUM_LOCALISED("Video", EAntiAliasing, AntiAliasing, EAntiAliasing
 CONFIG_DEFINE_LOCALISED("Video", bool, TransparencyAntiAliasing, true, false);
 CONFIG_DEFINE("Video", uint32_t, AnisotropicFiltering, 16, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Video", EShadowResolution, ShadowResolution, EShadowResolution::x4096, false);
+CONFIG_DEFINE_LOCALISED("Video", int32_t, ShadowSoftness, 1, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Video", EReflectionResolution, ReflectionResolution, EReflectionResolution::Half, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Video", ERadialBlur, RadialBlur, ERadialBlur::Original, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Video", ECutsceneAspectRatio, CutsceneAspectRatio, ECutsceneAspectRatio::Original, false);
