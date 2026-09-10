@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dlss-poc
+      - dlss-fg-poc
   pull_request:
     types: [opened, synchronize]
   workflow_dispatch:
@@ -177,7 +178,10 @@ jobs:
             "sl.common.dll",
             "sl.pcl.dll",
             "sl.dlss.dll",
-            "nvngx_dlss.dll"
+            "nvngx_dlss.dll",
+            "sl.dlss_g.dll",
+            "nvngx_dlssg.dll",
+            "sl.reflex.dll"
           )
 
           foreach ($file in $required) {
