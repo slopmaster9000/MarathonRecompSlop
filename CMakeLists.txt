@@ -89,5 +89,7 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionLazyRigidFix.cm
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionDefault.cmake")
 
 # VR is deliberately last: it layers on top of either the vanilla renderer or
-# the final DLSS-generated renderer sources.
+# the final DLSS-generated renderer sources. The small v2 module then swaps the
+# runtime implementation without touching the generated capture hooks.
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVR.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRStereoV2.cmake")
