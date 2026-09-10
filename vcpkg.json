@@ -9,6 +9,10 @@
             "name": "directx12-agility",
             "platform": "windows"
         },
+        {
+            "name": "openxr-loader",
+            "platform": "windows"
+        },
         "freetype",
         "curl"
     ],
