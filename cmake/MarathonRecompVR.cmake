@@ -39,13 +39,18 @@ if(MARATHON_RECOMP_DLSS)
     endif()
     set(_MR_VR_VIDEO_SOURCE "${_MR_DLSS_GENERATED_VIDEO}")
     set(_MR_VR_APP_SOURCE "${_MR_DLSS_GENERATED_APP}")
+
+    # Keep the wrapped files beside DLSS's generated .inl helpers. video_dlss.cpp
+    # intentionally includes several of those helpers by source-relative name.
+    set(_MR_VR_GENERATED_DIR "${_MR_DLSS_GENERATED_DIR}")
+    set(_MR_VR_GENERATED_GPU_DIR "${_MR_DLSS_GENERATED_GPU_DIR}")
 else()
     set(_MR_VR_VIDEO_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/video.cpp")
     set(_MR_VR_APP_SOURCE "${CMAKE_SOURCE_DIR}/MarathonRecomp/app.cpp")
+    set(_MR_VR_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated/MarathonRecompVR")
+    set(_MR_VR_GENERATED_GPU_DIR "${_MR_VR_GENERATED_DIR}/gpu")
 endif()
 
-set(_MR_VR_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated/MarathonRecompVR")
-set(_MR_VR_GENERATED_GPU_DIR "${_MR_VR_GENERATED_DIR}/gpu")
 set(_MR_VR_GENERATED_VIDEO "${_MR_VR_GENERATED_GPU_DIR}/video_vr.cpp")
 set(_MR_VR_GENERATED_APP "${_MR_VR_GENERATED_DIR}/app_vr.cpp")
 
@@ -58,6 +63,13 @@ macro(_mr_vr_video_replace _description _needle _replacement)
     endif()
     string(REPLACE "${_needle}" "${_replacement}" _mr_vr_video "${_mr_vr_video}")
 endmacro()
+
+if(NOT MARATHON_RECOMP_DLSS)
+    _mr_vr_video_replace(
+        "fixing the XenosRecomp include for the generated vanilla renderer"
+        "#include \"../../tools/XenosRecomp/XenosRecomp/shader_common.h\""
+        "#include \"${CMAKE_SOURCE_DIR}/tools/XenosRecomp/XenosRecomp/shader_common.h\"")
+endif()
 
 _mr_vr_video_replace(
     "adding the OpenXR renderer include"
