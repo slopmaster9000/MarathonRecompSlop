@@ -22,6 +22,11 @@ namespace VR
     // eye/head translation and an off-axis portal projection through a fixed
     // plane. Immersive 360 applies the full eye pose and OpenXR per-eye FOV.
     bool ShouldRenderStereoScene();
+
+    // Compatibility name used by the generated renderer/app hook. In the stereo
+    // v2 runtime this means "render two scene eyes" for either VR mode.
+    bool ShouldRenderImmersiveStereo();
+
     bool ApplyEyePose(uint32_t eye);
     void RestoreGameCamera();
 
