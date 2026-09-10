@@ -862,6 +862,7 @@ static void DrawOptions(ImVec2 min, ImVec2 max)
             DrawOption(rowCount++, &Config::AntiAliasing, false, devReason);                           // TODO: implement MSAA.          DrawOption(rowCount++, &Config::AntiAliasing, Config::AntiAliasing.InaccessibleValues.size() != 3, &Localise("Options_Desc_NotAvailableHardware"));
             DrawOption(rowCount++, &Config::TransparencyAntiAliasing, false, devReason);               // TODO: implement MSAA.          DrawOption(rowCount++, &Config::TransparencyAntiAliasing, Config::AntiAliasing != EAntiAliasing::Off, &Localise("Options_Desc_NotAvailableMSAA"));
             DrawOption(rowCount++, &Config::ShadowResolution, !OptionsMenu::s_isPause, cmnReason);     // TODO: allow changes on demand. DrawOption(rowCount++, &Config::ShadowResolution, true);    
+            DrawOption(rowCount++, &Config::ShadowSoftness, true, nullptr, 1, 2, 4, false);
             DrawOption(rowCount++, &Config::ReflectionResolution, !OptionsMenu::s_isPause, cmnReason); // TODO: allow changes on demand. DrawOption(rowCount++, &Config::ReflectionResolution, true);
             DrawOption(rowCount++, &Config::RadialBlur, true);
             DrawOption(rowCount++, &Config::CutsceneAspectRatio, true);

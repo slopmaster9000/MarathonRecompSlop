@@ -49,7 +49,7 @@ add_custom_command(
 )
 
 set(XENOS_RECOMP_ROOT "${MARATHON_RECOMP_TOOLS_ROOT}/XenosRecomp/XenosRecomp")
-set(XENOS_RECOMP_INCLUDE "${XENOS_RECOMP_ROOT}/shader_common.h")
+set(XENOS_RECOMP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shader/marathon_shader_common.h")
 
 target_compile_definitions(XenosRecomp PRIVATE 
     XENOS_RECOMP_INPUT=\"${CMAKE_CURRENT_SOURCE_DIR}/private/shader\" 

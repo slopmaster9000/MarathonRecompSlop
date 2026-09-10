@@ -224,6 +224,7 @@ struct SharedConstants
     float alphaThreshold{};
     uint32_t conditionalSurveyIndex{};
     uint32_t conditionalRenderingIndex{};
+    float shadowSoftness{ 1.0f };
 };
 
 // Depth bias values here are only used when the render device has 
@@ -4967,6 +4968,11 @@ static constexpr float COMMON_SLOPE_SCALED_DEPTH_BIAS_VALUE = 1.0f;
 
 static void FlushRenderStateForRenderThread()
 {
+    // Sonic 06 uses Texture2DArray fetches exclusively for its CSM shadow map.
+    // Scale the native four-tap PCF kernel live from the graphics-menu setting.
+    SetDirtyValue(g_dirtyStates.sharedConstants, g_sharedConstants.shadowSoftness,
+        float(std::clamp(Config::ShadowSoftness.Value, 1, 4)));
+
     auto renderTarget = g_pipelineState.colorWriteEnable ? g_renderTarget : nullptr;
     auto depthStencil = g_pipelineState.zEnable || g_pipelineState.stencilEnable ? g_depthStencil : nullptr;
 

@@ -731,6 +731,16 @@ CONFIG_DEFINE_LOCALE(ShadowResolution)
 
 CONFIG_DEFINE_ENUM_LOCALE(EShadowResolution) {};
 
+CONFIG_DEFINE_LOCALE(ShadowSoftness)
+{
+    { ELanguage::English,  { "Shadow Softness", "Set the width of real-time shadow filtering. Higher values produce softer shadow edges." } },
+    { ELanguage::Japanese, { "影の柔らかさ", "リアルタイムの影のフィルター幅を設定します。値を大きくすると影の輪郭が柔らかくなります" } },
+    { ELanguage::German,   { "Schattenweichheit", "Stelle die Filterbreite der Echtzeit-Schatten ein. Höhere Werte erzeugen weichere Schattenkanten." } },
+    { ELanguage::French,   { "Douceur des ombres", "Définit la largeur du filtrage des ombres en temps réel. Des valeurs plus élevées adoucissent les contours." } },
+    { ELanguage::Spanish,  { "Suavidad de sombras", "Establece la amplitud del filtrado de sombras en tiempo real. Los valores más altos suavizan los bordes." } },
+    { ELanguage::Italian,  { "Morbidezza ombre", "Imposta l'ampiezza del filtro delle ombre in tempo reale. Valori più alti rendono i bordi più morbidi." } }
+};
+
 CONFIG_DEFINE_LOCALE(ReflectionResolution)
 {
     { ELanguage::English,  { "Reflection Resolution", "Set the resolution of real-time reflections." } },
