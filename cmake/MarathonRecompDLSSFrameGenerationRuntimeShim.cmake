@@ -1,14 +1,16 @@
 # Configure-time compatibility shim for the DLSS Frame Generation runtime layer.
 #
 # Several experimental DLSS layers patch the generated video.cpp in sequence.
-# The FG runtime originally anchored two insertions to surrounding statements
-# that earlier DLSS layers are allowed to modify. Patch the runtime script itself
-# to use the unique DLSS calls as insertion points instead:
+# The FG runtime originally anchored insertions to surrounding statements that
+# earlier DLSS layers are allowed to modify. Patch the runtime script itself to
+# use stable insertion points instead:
+#   * include dlss_fg_runtime.inl only after UploadAllocator state is declared
 #   * DLSSPrepareFrameResources() for Reflex frame start
 #   * DLSSEvaluateRenderedFrame() for the pre-UI FG input capture
 #
-# This keeps the FG implementation itself unchanged while making the generated
-# source patch order tolerant of unrelated code inserted around those calls.
+# Keeping the FG helper below g_pipelineLayout and g_uploadAllocators is required
+# because it uses both objects directly. The base DLSS runtime remains at its
+# original earlier include point, so all of its generated state is still visible.
 
 if(NOT MARATHON_RECOMP_DLSS OR NOT MARATHON_RECOMP_DLSS_FRAME_GENERATION)
     return()
@@ -39,6 +41,18 @@ macro(_mr_dlss_fg_shim_replace _description _old_block _new_block)
         "${_mr_dlss_fg_runtime_script}")
 endmacro()
 
+set(_MR_DLSS_FG_RUNTIME_OLD_INCLUDE [=[_mr_dlss_fg_runtime_replace(
+    _mr_dlss_fg_runtime_video
+    "including the DLSS-G renderer runtime"
+    "#include \"dlss_video_runtime.inl\""
+    "#include \"dlss_video_runtime.inl\"\n#include \"dlss_fg_runtime.inl\"")]=])
+
+set(_MR_DLSS_FG_RUNTIME_NEW_INCLUDE [=[_mr_dlss_fg_runtime_replace(
+    _mr_dlss_fg_runtime_video
+    "including the DLSS-G renderer runtime after renderer upload allocator state is declared"
+    "static UploadAllocator g_uploadAllocators[NUM_FRAMES];"
+    "static UploadAllocator g_uploadAllocators[NUM_FRAMES];\n\n#include \"dlss_fg_runtime.inl\"")]=])
+
 set(_MR_DLSS_FG_RUNTIME_OLD_FRAME_START [=[_mr_dlss_fg_runtime_replace(
     _mr_dlss_fg_runtime_video
     "starting Reflex frame tracking after the DLSS frame index advances"
@@ -64,6 +78,11 @@ set(_MR_DLSS_FG_RUNTIME_NEW_PRE_UI_CAPTURE [=[_mr_dlss_fg_runtime_replace(
     "    DLSSEvaluateRenderedFrame();\n    DLSSFGPreparePresentInputs();")]=])
 
 _mr_dlss_fg_shim_replace(
+    "runtime include"
+    _MR_DLSS_FG_RUNTIME_OLD_INCLUDE
+    _MR_DLSS_FG_RUNTIME_NEW_INCLUDE)
+
+_mr_dlss_fg_shim_replace(
     "frame-start"
     _MR_DLSS_FG_RUNTIME_OLD_FRAME_START
     _MR_DLSS_FG_RUNTIME_NEW_FRAME_START)
@@ -80,5 +99,5 @@ get_filename_component(_MR_DLSS_FG_RUNTIME_GENERATED_DIR
 file(MAKE_DIRECTORY "${_MR_DLSS_FG_RUNTIME_GENERATED_DIR}")
 file(WRITE "${_MR_DLSS_FG_RUNTIME_GENERATED_SCRIPT}" "${_mr_dlss_fg_runtime_script}")
 
-message(STATUS "DLSS Frame Generation: using robust generated-video runtime anchors")
+message(STATUS "DLSS Frame Generation: using robust generated-video runtime anchors and late renderer-state include")
 include("${_MR_DLSS_FG_RUNTIME_GENERATED_SCRIPT}")
