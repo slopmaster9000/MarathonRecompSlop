@@ -51,6 +51,8 @@ add_custom_command(
 set(XENOS_RECOMP_ROOT "${MARATHON_RECOMP_TOOLS_ROOT}/XenosRecomp/XenosRecomp")
 set(XENOS_RECOMP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shader/marathon_shader_common.h")
 
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompSoftShadows.cmake")
+
 target_compile_definitions(XenosRecomp PRIVATE 
     XENOS_RECOMP_INPUT=\"${CMAKE_CURRENT_SOURCE_DIR}/private/shader\" 
     XENOS_RECOMP_OUTPUT=\"${CMAKE_CURRENT_SOURCE_DIR}/shader/shader_cache.cpp\"

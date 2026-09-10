@@ -126,6 +126,14 @@ enum class EShadowResolution : int32_t
     x8192 = 8192
 };
 
+enum class EShadowSoftness : int32_t
+{
+    Original,
+    Low,
+    Medium,
+    High
+};
+
 enum class EReflectionResolution : int32_t
 {
     Eighth,

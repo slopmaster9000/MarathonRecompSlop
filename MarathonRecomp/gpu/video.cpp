@@ -4968,10 +4968,11 @@ static constexpr float COMMON_SLOPE_SCALED_DEPTH_BIAS_VALUE = 1.0f;
 
 static void FlushRenderStateForRenderThread()
 {
-    // Sonic 06 uses Texture2DArray fetches exclusively for its CSM shadow map.
-    // Scale the native four-tap PCF kernel live from the graphics-menu setting.
+    // Runtime encoding intentionally remains 1..4 because the Marathon shader
+    // common uses 1.0 as the exact-original fallback for any untransformed CSM fetch.
+    // Original=1, Low=2, Medium=3, High=4.
     SetDirtyValue(g_dirtyStates.sharedConstants, g_sharedConstants.shadowSoftness,
-        float(std::clamp(Config::ShadowSoftness.Value, 1, 4)));
+        float(uint32_t(Config::ShadowSoftness.Value) + 1u));
 
     auto renderTarget = g_pipelineState.colorWriteEnable ? g_renderTarget : nullptr;
     auto depthStencil = g_pipelineState.zEnable || g_pipelineState.stencilEnable ? g_depthStencil : nullptr;

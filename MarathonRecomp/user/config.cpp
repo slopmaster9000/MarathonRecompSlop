@@ -357,6 +357,14 @@ CONFIG_DEFINE_ENUM_TEMPLATE(EShadowResolution)
     { "8192",     EShadowResolution::x8192 },
 };
 
+CONFIG_DEFINE_ENUM_TEMPLATE(EShadowSoftness)
+{
+    { "Original", EShadowSoftness::Original },
+    { "Low",      EShadowSoftness::Low },
+    { "Medium",   EShadowSoftness::Medium },
+    { "High",     EShadowSoftness::High }
+};
+
 CONFIG_DEFINE_ENUM_TEMPLATE(EReflectionResolution)
 {
     { "Full",    EReflectionResolution::Full },
