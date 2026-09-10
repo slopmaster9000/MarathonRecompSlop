@@ -1,0 +1,153 @@
+name: Apply Shadow Softness
+
+on:
+  push:
+    branches:
+      - shadow-softness
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          ref: shadow-softness
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Apply runtime shadow softness implementation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              path = Path(path)
+              text = path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected exactly one match, found {count}: {old[:100]!r}")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Graphics menu: a discrete 1..4 control immediately after shadow resolution.
+          path = Path("MarathonRecomp/ui/options_menu.cpp")
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          matches = [i for i, line in enumerate(lines) if "DrawOption(rowCount++, &Config::ShadowResolution" in line]
+          if len(matches) != 1:
+              raise RuntimeError(f"options_menu.cpp: expected one ShadowResolution option, found {len(matches)}")
+          lines.insert(matches[0] + 1, "            DrawOption(rowCount++, &Config::ShadowSoftness, true, nullptr, 1, 2, 4, false);\n")
+          path.write_text("".join(lines), encoding="utf-8")
+
+          # Localised menu name and description.
+          replace_once(
+              "MarathonRecomp/locale/config_locale.cpp",
+              "CONFIG_DEFINE_ENUM_LOCALE(EShadowResolution) {};\n",
+              """CONFIG_DEFINE_ENUM_LOCALE(EShadowResolution) {};
+
+CONFIG_DEFINE_LOCALE(ShadowSoftness)
+{
+    { ELanguage::English,  { \"Shadow Softness\", \"Set the width of real-time shadow filtering. Higher values produce softer shadow edges.\" } },
+    { ELanguage::Japanese, { \"影の柔らかさ\", \"リアルタイムの影のフィルター幅を設定します。値を大きくすると影の輪郭が柔らかくなります\" } },
+    { ELanguage::German,   { \"Schattenweichheit\", \"Stelle die Filterbreite der Echtzeit-Schatten ein. Höhere Werte erzeugen weichere Schattenkanten.\" } },
+    { ELanguage::French,   { \"Douceur des ombres\", \"Définit la largeur du filtrage des ombres en temps réel. Des valeurs plus élevées adoucissent les contours.\" } },
+    { ELanguage::Spanish,  { \"Suavidad de sombras\", \"Establece la amplitud del filtrado de sombras en tiempo real. Los valores más altos suavizan los bordes.\" } },
+    { ELanguage::Italian,  { \"Morbidezza ombre\", \"Imposta l'ampiezza del filtro delle ombre in tempo reale. Valori più alti rendono i bordi più morbidi.\" } }
+};
+"""
+          )
+
+          # CPU-side shared shader constant. Offset 320 follows conditionalRenderingIndex.
+          replace_once(
+              "MarathonRecomp/gpu/video.cpp",
+              "    uint32_t conditionalSurveyIndex{};\n    uint32_t conditionalRenderingIndex{};\n};",
+              "    uint32_t conditionalSurveyIndex{};\n    uint32_t conditionalRenderingIndex{};\n    float shadowSoftness{ 1.0f };\n};"
+          )
+          replace_once(
+              "MarathonRecomp/gpu/video.cpp",
+              "static void FlushRenderStateForRenderThread()\n{\n",
+              "static void FlushRenderStateForRenderThread()\n{\n    // Sonic 06 uses Texture2DArray fetches exclusively for its CSM shadow map.\n    // Scale the native four-tap PCF kernel live from the graphics-menu setting.\n    SetDirtyValue(g_dirtyStates.sharedConstants, g_sharedConstants.shadowSoftness,\n        float(std::clamp(Config::ShadowSoftness.Value, 1, 4)));\n\n"
+          )
+
+          # Use a Marathon-owned copy of shader_common so XenosRecomp stays unmodified.
+          replace_once(
+              "MarathonRecompLib/CMakeLists.txt",
+              'set(XENOS_RECOMP_INCLUDE "${XENOS_RECOMP_ROOT}/shader_common.h")',
+              'set(XENOS_RECOMP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shader/marathon_shader_common.h")'
+          )
+
+          upstream = Path("tools/XenosRecomp/XenosRecomp/shader_common.h")
+          shader = upstream.read_text(encoding="utf-8")
+          shader = "// MarathonRecomp-local shader common. Based on the pinned XenosRecomp shader_common.h.\n// Adds a runtime CSM filter-radius control; keep other translation behavior unchanged.\n" + shader
+
+          old_shared = "    uint g_conditionalSurveyIndex : packoffset(c19.z); \\\n    uint g_conditionalRenderingIndex : packoffset(c19.w);"
+          new_shared = "    uint g_conditionalSurveyIndex : packoffset(c19.z); \\\n    uint g_conditionalRenderingIndex : packoffset(c19.w); \\\n    float g_ShadowSoftness : packoffset(c20.x);"
+          if shader.count(old_shared) != 1:
+              raise RuntimeError("shader_common: D3D shared-constant layout marker not found uniquely")
+          shader = shader.replace(old_shared, new_shared, 1)
+
+          if shader.count("float4 tfetch2DArray(") != 2:
+              raise RuntimeError("shader_common: expected exactly two tfetch2DArray helpers")
+          shader = shader.replace("float4 tfetch2DArray(", "float4 marathon_tfetch2DArrayBase(")
+
+          marker = "#endif\n\n#ifdef __air__\n#define selectWrapper(a, b, c) select(c, b, a)"
+          if shader.count(marker) != 1:
+              raise RuntimeError("shader_common: texture helper terminator not found uniquely")
+
+          wrapper = r'''#endif
+
+// Sonic 06's translated Texture2DArray fetches are exclusively g_smpCSM shadow-map
+// samples. The original Xenos offsets become +/-0.5 texel after translation. Scaling
+// only these explicit fetch offsets preserves the original depth compare, cascade,
+// bias, GetWeights and DP4 visibility-combine logic while widening the PCF footprint.
+#ifdef MARATHON_RECOMP
+#ifdef __air__
+#define MARATHON_SHADOW_SOFTNESS (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 320)))
+#define tfetch2DArray(textureHeap, samplerHeap, resourceDescriptorIndex, samplerDescriptorIndex, texCoord, offset) \
+    marathon_tfetch2DArrayBase(textureHeap, samplerHeap, resourceDescriptorIndex, samplerDescriptorIndex, texCoord, \
+        float3((offset).xy * MARATHON_SHADOW_SOFTNESS, (offset).z))
+#else
+#ifdef __spirv__
+#define MARATHON_SHADOW_SOFTNESS vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 320)
+#else
+#define MARATHON_SHADOW_SOFTNESS g_ShadowSoftness
+#endif
+#define tfetch2DArray(resourceDescriptorIndex, samplerDescriptorIndex, texCoord, offset) \
+    marathon_tfetch2DArrayBase(resourceDescriptorIndex, samplerDescriptorIndex, texCoord, \
+        float3((offset).xy * MARATHON_SHADOW_SOFTNESS, (offset).z))
+#endif
+#endif
+
+#ifdef __air__
+#define selectWrapper(a, b, c) select(c, b, a)'''
+          shader = shader.replace(marker, wrapper, 1)
+
+          out = Path("MarathonRecompLib/shader/marathon_shader_common.h")
+          out.write_text(shader, encoding="utf-8")
+
+          # Keep this experimental branch building automatically on later pushes.
+          replace_once(
+              ".github/workflows/build-dlss.yml",
+              "    branches:\n      - dlss-poc\n",
+              "    branches:\n      - dlss-poc\n      - shadow-softness\n"
+          )
+          PY
+
+      - name: Remove one-shot patch workflow and commit implementation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-shadow-softness.yml
+          git add MarathonRecomp/ui/options_menu.cpp \
+                  MarathonRecomp/locale/config_locale.cpp \
+                  MarathonRecomp/gpu/video.cpp \
+                  MarathonRecompLib/CMakeLists.txt \
+                  MarathonRecompLib/shader/marathon_shader_common.h \
+                  .github/workflows/build-dlss.yml
+          git commit -m "Add runtime shadow softness control"
+          git push origin HEAD:shadow-softness
