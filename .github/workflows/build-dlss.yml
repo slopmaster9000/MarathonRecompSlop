@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dlss-poc
+      - shadow-softness
   pull_request:
     types: [opened, synchronize]
   workflow_dispatch:
