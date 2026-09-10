@@ -2,12 +2,19 @@
 
 #include <cstdint>
 
+// openxr_platform.h expects the native D3D12/Win32 types to already be known.
+// Pull Plume's D3D12 declarations in first for VR builds so it uses the same
+// DirectX-Headers/Agility SDK selection as the renderer.
+#if defined(MARATHON_RECOMP_VR) && defined(MARATHON_RECOMP_D3D12) && defined(_WIN32)
+#include <plume_d3d12.h>
+#else
 namespace plume
 {
     struct RenderCommandQueue;
     struct RenderDevice;
     struct RenderTexture;
 }
+#endif
 
 namespace VR
 {
