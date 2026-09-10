@@ -39,7 +39,7 @@ jobs:
                   MarathonRecomp/locale/config_locale.cpp \
                   MarathonRecomp/gpu/video.cpp \
                   MarathonRecompLib/CMakeLists.txt \
-                  MarathonRecompLib/shader/marathon_shader_common.h \
                   .github/workflows/build-dlss.yml
+          git add -f MarathonRecompLib/shader/marathon_shader_common.h
           git commit -m "Add runtime shadow softness control"
           git push origin HEAD:shadow-softness
