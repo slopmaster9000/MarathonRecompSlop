@@ -63,58 +63,8 @@ _mr_vr_boot_replace(_mr_vr_boot_app "removing the extra desktop-mirror guest ren
 
 file(WRITE "${_MR_VR_GENERATED_APP}" "${_mr_vr_boot_app}")
 
-# CaptureEye(2) is a private sentinel meaning: at the next Present, snapshot the
-# one completed frame into BOTH persistent eye textures. ProcCaptureVREye can be
-# called twice safely because it only records two capture passes into the same
-# host command list; it does not re-run Sonic 06 rendering.
-file(READ "${_MR_VR_GENERATED_VIDEO}" _mr_vr_boot_video)
-
-set(_MR_VR_CAPTURE_FN_OLD [=[#ifdef MARATHON_RECOMP_VR
-void VR::CaptureEye(uint32_t eye)
-{
-    if (eye < 2)
-        g_vrCaptureEyeRequest.store(static_cast<int32_t>(eye), std::memory_order_release);
-}
-#endif]=])
-set(_MR_VR_CAPTURE_FN_NEW [=[#ifdef MARATHON_RECOMP_VR
-void VR::CaptureEye(uint32_t eye)
-{
-    // 0/1 = one stereo eye, 2 = one normal frame duplicated to both eyes.
-    if (eye <= 2)
-    {
-        VR::NoteCaptureRequest(eye);
-        g_vrCaptureEyeRequest.store(static_cast<int32_t>(eye), std::memory_order_release);
-    }
-}
-#endif]=])
-_mr_vr_boot_replace(_mr_vr_boot_video "allowing the mono-to-both-eyes capture sentinel"
-    "${_MR_VR_CAPTURE_FN_OLD}" "${_MR_VR_CAPTURE_FN_NEW}")
-
-set(_MR_VR_CAPTURE_EXEC_OLD [=[    if (requestedVREye >= 0 && requestedVREye < 2)
-    {
-        RenderCommand vrCaptureCommand{};
-        vrCaptureCommand.type = RenderCommandType::CaptureVREye;
-        vrCaptureCommand.captureVREye.eye = static_cast<uint32_t>(requestedVREye);
-        ProcCaptureVREye(vrCaptureCommand);
-    }]=])
-set(_MR_VR_CAPTURE_EXEC_NEW [=[    if (requestedVREye >= 0 && requestedVREye < 2)
-    {
-        RenderCommand vrCaptureCommand{};
-        vrCaptureCommand.type = RenderCommandType::CaptureVREye;
-        vrCaptureCommand.captureVREye.eye = static_cast<uint32_t>(requestedVREye);
-        ProcCaptureVREye(vrCaptureCommand);
-    }
-    else if (requestedVREye == 2)
-    {
-        RenderCommand vrCaptureCommand{};
-        vrCaptureCommand.type = RenderCommandType::CaptureVREye;
-        vrCaptureCommand.captureVREye.eye = 0;
-        ProcCaptureVREye(vrCaptureCommand);
-        ProcDuplicateVREye();
-    }]=])
-_mr_vr_boot_replace(_mr_vr_boot_video "capturing one non-gameplay frame into both eyes"
-    "${_MR_VR_CAPTURE_EXEC_OLD}" "${_MR_VR_CAPTURE_EXEC_NEW}")
-
-file(WRITE "${_MR_VR_GENERATED_VIDEO}" "${_mr_vr_boot_video}")
+# CaptureEye(2) is a private sentinel meaning: at the next Present, mirror the
+# one completed frame into both eyes. MarathonRecompVR.cmake implements that
+# directly in the renderer, so nothing further is patched here.
 
 message(STATUS "SlopVR: boot safety enabled (single-render mono fallback; no extra mirror guest pass)")

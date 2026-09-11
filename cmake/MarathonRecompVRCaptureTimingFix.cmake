@@ -47,75 +47,9 @@ _mr_vr_timing_replace(_mr_vr_timing_app "adding a monoscopic stereo fallback for
 
 file(WRITE "${_MR_VR_GENERATED_APP}" "${_mr_vr_timing_app}")
 
-# -----------------------------------------------------------------------------
-# CaptureEye is now an arm-for-next-Present request instead of a render-command
-# enqueue. ProcExecuteCommandList runs after all guest draws for that present,
-# which is the correct point to snapshot the completed eye image.
-# -----------------------------------------------------------------------------
-file(READ "${_MR_VR_GENERATED_VIDEO}" _mr_vr_timing_video)
-
-_mr_vr_timing_replace(_mr_vr_timing_video "adding the next-present eye request"
-    "static uint32_t g_vrEyeCaptureHeights[2]{};\n#endif"
-    "static uint32_t g_vrEyeCaptureHeights[2]{};\nstatic std::atomic<int32_t> g_vrCaptureEyeRequest{ -1 };\n#endif")
-
-set(_MR_VR_OLD_CAPTURE_FUNCTION [=[#ifdef MARATHON_RECOMP_VR
-void VR::CaptureEye(uint32_t eye)
-{
-    if (eye >= 2)
-        return;
-    RenderCommand cmd{};
-    cmd.type = RenderCommandType::CaptureVREye;
-    cmd.captureVREye.eye = eye;
-    g_renderQueue.enqueue(cmd);
-}
-#endif]=])
-set(_MR_VR_NEW_CAPTURE_FUNCTION [=[#ifdef MARATHON_RECOMP_VR
-void VR::CaptureEye(uint32_t eye)
-{
-    if (eye < 2)
-        g_vrCaptureEyeRequest.store(static_cast<int32_t>(eye), std::memory_order_release);
-}
-#endif]=])
-_mr_vr_timing_replace(_mr_vr_timing_video "changing CaptureEye to arm the next present"
-    "${_MR_VR_OLD_CAPTURE_FUNCTION}"
-    "${_MR_VR_NEW_CAPTURE_FUNCTION}")
-
-set(_MR_VR_PROC_EXECUTE_ANCHOR [=[static void ProcExecuteCommandList(const RenderCommand& cmd)
-{    
-    RenderTexture* vrPresentationTexture = nullptr;
-]=])
-set(_MR_VR_PROC_EXECUTE_REPLACEMENT [=[static void ProcExecuteCommandList(const RenderCommand& cmd)
-{    
-    RenderTexture* vrPresentationTexture = nullptr;
-
-#ifdef MARATHON_RECOMP_VR
-    // Capture the eye that was armed before this guest render. At this point
-    // every draw for the current Sonic 06 Present has already been recorded.
-    int32_t requestedVREye = g_vrCaptureEyeRequest.exchange(-1, std::memory_order_acq_rel);
-    if (requestedVREye < 0 && VR::WantsEyeCapture())
-    {
-        // Nothing armed this Present. Mirror the finished frame into both eyes
-        // anyway. The headset must always show what the desktop shows; stereo
-        // is an upgrade on top of that, never a precondition for seeing
-        // anything at all. Relying on the guest render hook to arm every frame
-        // made a whole session present two captured frames and then reproject
-        // the same stale image forever.
-        requestedVREye = 2;
-    }
-    if (requestedVREye >= 0 && requestedVREye < 2)
-    {
-        RenderCommand vrCaptureCommand{};
-        vrCaptureCommand.type = RenderCommandType::CaptureVREye;
-        vrCaptureCommand.captureVREye.eye = static_cast<uint32_t>(requestedVREye);
-        ProcCaptureVREye(vrCaptureCommand);
-    }
-#endif
-]=])
-_mr_vr_timing_replace(_mr_vr_timing_video "capturing the armed eye at Present"
-    "${_MR_VR_PROC_EXECUTE_ANCHOR}"
-    "${_MR_VR_PROC_EXECUTE_REPLACEMENT}")
-
-file(WRITE "${_MR_VR_GENERATED_VIDEO}" "${_mr_vr_timing_video}")
+# The renderer-side capture now lives entirely in MarathonRecompVR.cmake: the
+# armed eye is consumed where the presented image exists, and the capture is a
+# copy rather than a shader pass. Nothing left to patch here on the video side.
 
 # -----------------------------------------------------------------------------
 # The OpenXR frame loop itself now lives in vr_stereo_runtime_v2.cpp, including

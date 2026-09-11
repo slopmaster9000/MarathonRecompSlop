@@ -135,18 +135,12 @@ _mr_vr_replace(_mr_vr_video "adding VR diagnostics to F1 profiler"
     "                IMGUI_GENERIC_ROW(\"Device Type\", \"%s\", DeviceTypeName(g_device->getDescription().type));"
     "                IMGUI_GENERIC_ROW(\"Device Type\", \"%s\", DeviceTypeName(g_device->getDescription().type));\n#ifdef MARATHON_RECOMP_VR\n                IMGUI_GENERIC_ROW(\"VR\", \"%s\", VR::GetStatus());\n#endif")
 
-_mr_vr_replace(_mr_vr_video "adding the eye capture render command type"
-    "    SetConditionalRendering,\n};"
-    "    SetConditionalRendering,\n    CaptureVREye,\n};")
-_mr_vr_replace(_mr_vr_video "adding eye index to render command payload"
-    "        } setConditionalRendering;\n    };"
-    "        } setConditionalRendering;\n\n        struct\n        {\n            uint32_t eye;\n        } captureVREye;\n    };")
 _mr_vr_replace(_mr_vr_video "adding persistent eye capture textures"
     "static uint32_t g_intermediaryBackBufferTextureDescriptorIndex;"
-    "static uint32_t g_intermediaryBackBufferTextureDescriptorIndex;\n\n#ifdef MARATHON_RECOMP_VR\nstatic std::unique_ptr<RenderTexture> g_vrEyeCaptureTextures[2];\nstatic std::unique_ptr<RenderFramebuffer> g_vrEyeCaptureFramebuffers[2];\nstatic uint32_t g_vrEyeCaptureWidths[2]{};\nstatic uint32_t g_vrEyeCaptureHeights[2]{};\n#endif")
-_mr_vr_replace(_mr_vr_video "adding the public eye capture enqueue function"
+    "static uint32_t g_intermediaryBackBufferTextureDescriptorIndex;\n\n#ifdef MARATHON_RECOMP_VR\nstatic std::unique_ptr<RenderTexture> g_vrEyeCaptureTextures[2];\nstatic uint32_t g_vrEyeCaptureWidths[2]{};\nstatic uint32_t g_vrEyeCaptureHeights[2]{};\n#endif")
+_mr_vr_replace(_mr_vr_video "adding the public eye capture request"
     "static moodycamel::BlockingConcurrentQueue<RenderCommand> g_renderQueue;"
-    "static moodycamel::BlockingConcurrentQueue<RenderCommand> g_renderQueue;\n\n#ifdef MARATHON_RECOMP_VR\nvoid VR::CaptureEye(uint32_t eye)\n{\n    if (eye >= 2)\n        return;\n    RenderCommand cmd{};\n    cmd.type = RenderCommandType::CaptureVREye;\n    cmd.captureVREye.eye = eye;\n    g_renderQueue.enqueue(cmd);\n}\n#endif")
+    "static moodycamel::BlockingConcurrentQueue<RenderCommand> g_renderQueue;\n\n#ifdef MARATHON_RECOMP_VR\nstatic std::atomic<int32_t> g_vrCaptureEyeRequest{ -1 };\n\n// 0/1 arm one stereo eye for the next Present; anything else lets the renderer\n// mirror that Present into both eyes.\nvoid VR::CaptureEye(uint32_t eye)\n{\n    VR::NoteCaptureRequest(eye);\n    g_vrCaptureEyeRequest.store(eye < 2 ? static_cast<int32_t>(eye) : 2, std::memory_order_release);\n}\n#endif")
 
 set(_MR_VR_CAPTURE_IMPL [=[
 #ifdef MARATHON_RECOMP_VR
@@ -161,195 +155,71 @@ static bool EnsureVREyeCapture(uint32_t eye, uint32_t width, uint32_t height)
         return true;
     }
 
-    g_vrEyeCaptureFramebuffers[eye].reset();
     g_vrEyeCaptureTextures[eye] = g_device->createTexture(
         RenderTextureDesc::ColorTarget(width, height, BACKBUFFER_FORMAT));
     if (g_vrEyeCaptureTextures[eye] == nullptr)
         return false;
-
-    const RenderTexture* colorAttachment = g_vrEyeCaptureTextures[eye].get();
-    RenderFramebufferDesc framebufferDesc{};
-    framebufferDesc.colorAttachments = &colorAttachment;
-    framebufferDesc.colorAttachmentsCount = 1;
-    g_vrEyeCaptureFramebuffers[eye] = g_device->createFramebuffer(framebufferDesc);
-    if (g_vrEyeCaptureFramebuffers[eye] == nullptr)
-    {
-        g_vrEyeCaptureTextures[eye].reset();
-        return false;
-    }
 
     g_vrEyeCaptureWidths[eye] = width;
     g_vrEyeCaptureHeights[eye] = height;
     return true;
 }
 
-static void InvalidateAfterVRCapture()
+// Copy the finished presented image into the eye textures.
+//
+// This is deliberately a pure copy. An earlier version ran a gamma/scaling
+// shader pass instead, which meant binding a framebuffer, pipeline, viewport
+// and scissor in the middle of the renderer's own frame and then marking that
+// state dirty again. Once the capture started running on every Present rather
+// than occasionally, that perturbation showed up as wrongly scaled menus on the
+// desktop as well as in the headset. A copy binds nothing, so it cannot disturb
+// the guest renderer at all - and it takes the image after gamma correction and
+// any DLSS upscale, so the headset shows exactly what the monitor shows without
+// depending on DLSS state.
+//
+// `source` must already be in COPY_SOURCE. `armedEye` is 0 or 1 to fill one
+// stereo eye, or negative to mirror the image into both.
+static void CaptureVRPresentedImage(
+    RenderTexture* source, uint32_t width, uint32_t height, int32_t armedEye)
 {
-    // The capture pass binds its own framebuffer/pipeline/viewport directly.
-    // Force the next guest draw to restore every affected state.
-    g_framebuffer = nullptr;
-    g_dirtyStates.renderTargetAndDepthStencil = true;
-    g_dirtyStates.viewport = true;
-    g_dirtyStates.pipelineState = true;
-    g_dirtyStates.scissorRect = true;
-    if (g_backend != Backend::D3D12)
-    {
-        g_dirtyStates.vertexShaderConstants = true;
-        g_dirtyStates.depthBias = true;
-    }
-}
-
-static void ProcCaptureVREye(const RenderCommand& cmd)
-{
-    const uint32_t eye = cmd.captureVREye.eye;
-    const uint32_t width = Video::s_viewportWidth;
-    const uint32_t height = Video::s_viewportHeight;
-    if (!EnsureVREyeCapture(eye, width, height) || g_backBuffer == nullptr || g_backBuffer->texture == nullptr)
+    if (source == nullptr || width == 0 || height == 0)
     {
         VR::NoteCaptureSkipped();
         return;
     }
 
+    const uint32_t firstEye = armedEye > 0 ? 1u : 0u;
+    const uint32_t lastEye = armedEye < 0 ? 1u : firstEye;
+
     auto& commandList = g_commandLists[g_frame];
-    RenderTexture* destination = g_vrEyeCaptureTextures[eye].get();
-    const bool viaIntermediary = g_backBuffer->texture == g_intermediaryBackBufferTexture.get();
-    bool captured = false;
-
-#ifdef MARATHON_RECOMP_DLSS
-    // Immersive stereo deliberately captures the raw per-eye guest render before
-    // DLSS temporal evaluation. A single temporal history cannot represent two
-    // cameras rendered inside one game frame. The existing DLSS gamma scaler is
-    // still useful here as a high-quality spatial presentation pass - but only
-    // once Streamline has actually produced a render extent. Before that (and
-    // when DLSS never initialises at all) g_dlssRenderWidth/Height are zero, the
-    // scaler samples an empty source rectangle, and every eye image is black.
-    if (viaIntermediary && g_dlssRenderWidth != 0 && g_dlssRenderHeight != 0)
+    for (uint32_t eye = firstEye; eye <= lastEye; eye++)
     {
-    AddBarrier(g_backBuffer, RenderTextureLayout::SHADER_READ);
-    FlushBarriers();
-    commandList->barriers(RenderBarrierStage::GRAPHICS | RenderBarrierStage::COPY,
-        RenderTextureBarrier(destination, RenderTextureLayout::COLOR_WRITE));
-
-    struct
-    {
-        float gamma;
-        uint32_t textureDescriptorIndex;
-        int32_t viewportOffsetX;
-        int32_t viewportOffsetY;
-        int32_t viewportWidth;
-        int32_t viewportHeight;
-        int32_t sourceWidth;
-        int32_t sourceHeight;
-    } constants{};
-
-    const float brightnessOffset = (Config::Brightness - 0.5f) * 1.2f;
-    constants.gamma = 1.0f / std::clamp(0.85f + brightnessOffset, 0.1f, 4.0f);
-    constants.textureDescriptorIndex = g_intermediaryBackBufferTextureDescriptorIndex;
-    constants.viewportWidth = int32_t(width);
-    constants.viewportHeight = int32_t(height);
-    constants.sourceWidth = int32_t(g_dlssRenderWidth);
-    constants.sourceHeight = int32_t(g_dlssRenderHeight);
-
-    commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
-    commandList->setPipeline(DLSSGetGammaScalePipeline());
-    commandList->setGraphicsDescriptorSet(g_textureDescriptorSet.get(), 0);
-    SetRootDescriptor(g_uploadAllocators[g_frame].allocate<false>(&constants, sizeof(constants), 0x100), 2);
-    commandList->setFramebuffer(g_vrEyeCaptureFramebuffers[eye].get());
-    commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
-    commandList->setScissors(RenderRect(0, 0, width, height));
-    commandList->drawInstanced(6, 1, 0, 0);
-
-    commandList->barriers(RenderBarrierStage::GRAPHICS | RenderBarrierStage::COPY,
-        RenderTextureBarrier(destination, RenderTextureLayout::COPY_SOURCE));
-    AddBarrier(g_backBuffer, RenderTextureLayout::COLOR_WRITE);
-    FlushBarriers();
-    captured = true;
-    }
-#endif
-
-    if (!captured && viaIntermediary)
-    {
-        AddBarrier(g_backBuffer, RenderTextureLayout::SHADER_READ);
-        FlushBarriers();
-        commandList->barriers(RenderBarrierStage::GRAPHICS | RenderBarrierStage::COPY,
-            RenderTextureBarrier(destination, RenderTextureLayout::COLOR_WRITE));
-
-        struct
+        if (!EnsureVREyeCapture(eye, width, height))
         {
-            float gamma;
-            uint32_t textureDescriptorIndex;
-            int32_t viewportOffsetX;
-            int32_t viewportOffsetY;
-            int32_t viewportWidth;
-            int32_t viewportHeight;
-        } constants{};
-        const float brightnessOffset = (Config::Brightness - 0.5f) * 1.2f;
-        constants.gamma = 1.0f / std::clamp(0.85f + brightnessOffset, 0.1f, 4.0f);
-        constants.textureDescriptorIndex = g_intermediaryBackBufferTextureDescriptorIndex;
-        constants.viewportWidth = int32_t(width);
-        constants.viewportHeight = int32_t(height);
+            VR::NoteCaptureSkipped();
+            return;
+        }
 
-        commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
-        commandList->setPipeline(g_gammaCorrectionPipeline.get());
-        commandList->setGraphicsDescriptorSet(g_textureDescriptorSet.get(), 0);
-        SetRootDescriptor(g_uploadAllocators[g_frame].allocate<false>(&constants, sizeof(constants), 0x100), 2);
-        commandList->setFramebuffer(g_vrEyeCaptureFramebuffers[eye].get());
-        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
-        commandList->setScissors(RenderRect(0, 0, width, height));
-        commandList->drawInstanced(6, 1, 0, 0);
-        commandList->barriers(RenderBarrierStage::GRAPHICS | RenderBarrierStage::COPY,
-            RenderTextureBarrier(destination, RenderTextureLayout::COPY_SOURCE));
-        AddBarrier(g_backBuffer, RenderTextureLayout::COLOR_WRITE);
-        FlushBarriers();
-    }
-    else if (!captured)
-    {
-        AddBarrier(g_backBuffer, RenderTextureLayout::COPY_SOURCE);
-        FlushBarriers();
+        RenderTexture* destination = g_vrEyeCaptureTextures[eye].get();
         commandList->barriers(RenderBarrierStage::COPY,
             RenderTextureBarrier(destination, RenderTextureLayout::COPY_DEST));
         commandList->copyTextureRegion(
             RenderTextureCopyLocation::Subresource(destination, 0),
-            RenderTextureCopyLocation::Subresource(g_backBuffer->texture, 0),
+            RenderTextureCopyLocation::Subresource(source, 0),
             0, 0, 0, nullptr);
         commandList->barriers(RenderBarrierStage::COPY,
             RenderTextureBarrier(destination, RenderTextureLayout::COPY_SOURCE));
-        AddBarrier(g_backBuffer, RenderTextureLayout::COLOR_WRITE);
-        FlushBarriers();
+        VR::MarkEyeCaptured(eye);
     }
-
-    InvalidateAfterVRCapture();
-    VR::MarkEyeCaptured(eye);
 }
 
-// The monoscopic path needs the same image in both eyes. A texture copy is far
-// cheaper than running the capture pass twice, and this runs on every Present.
-static void ProcDuplicateVREye()
+// The eye armed before this guest render, or -1 to mirror into both eyes.
+static int32_t TakeVRCaptureRequest()
 {
-    if (!EnsureVREyeCapture(1, g_vrEyeCaptureWidths[0], g_vrEyeCaptureHeights[0]))
-    {
-        VR::NoteCaptureSkipped();
-        return;
-    }
-
-    RenderTexture* source = g_vrEyeCaptureTextures[0].get();
-    RenderTexture* destination = g_vrEyeCaptureTextures[1].get();
-    if (source == nullptr || destination == nullptr)
-    {
-        VR::NoteCaptureSkipped();
-        return;
-    }
-
-    auto& commandList = g_commandLists[g_frame];
-    commandList->barriers(RenderBarrierStage::COPY,
-        RenderTextureBarrier(destination, RenderTextureLayout::COPY_DEST));
-    commandList->copyTextureRegion(
-        RenderTextureCopyLocation::Subresource(destination, 0),
-        RenderTextureCopyLocation::Subresource(source, 0),
-        0, 0, 0, nullptr);
-    commandList->barriers(RenderBarrierStage::COPY,
-        RenderTextureBarrier(destination, RenderTextureLayout::COPY_SOURCE));
-    VR::MarkEyeCaptured(1);
+    const int32_t request = g_vrCaptureEyeRequest.exchange(-1, std::memory_order_acq_rel);
+    if (request == 0 || request == 1)
+        return request;
+    return VR::WantsEyeCapture() ? -1 : -2;
 }
 #endif
 ]=])
@@ -358,9 +228,6 @@ _mr_vr_replace(_mr_vr_video "adding the renderer eye capture implementation"
     "static void ProcExecuteCommandList(const RenderCommand& cmd)\n{"
     "${_MR_VR_CAPTURE_IMPL}\nstatic void ProcExecuteCommandList(const RenderCommand& cmd)\n{")
 
-_mr_vr_replace(_mr_vr_video "dispatching the eye capture render command"
-    "                case RenderCommandType::SetConditionalRendering:           ProcSetConditionalRendering(cmd); break;\n                default:"
-    "                case RenderCommandType::SetConditionalRendering:           ProcSetConditionalRendering(cmd); break;\n#ifdef MARATHON_RECOMP_VR\n                case RenderCommandType::CaptureVREye:                           ProcCaptureVREye(cmd); break;\n#endif\n                default:")
 
 # In Immersive 360, two different camera views share one emulated game frame.
 # Do not feed either eye through the single-view DLSS temporal history or apply
@@ -376,10 +243,19 @@ endif()
 
 _mr_vr_replace(_mr_vr_video "remembering the desktop presentation texture"
     "static void ProcExecuteCommandList(const RenderCommand& cmd)\n{    \n"
-    "static void ProcExecuteCommandList(const RenderCommand& cmd)\n{    \n    RenderTexture* vrPresentationTexture = nullptr;\n")
+    "static void ProcExecuteCommandList(const RenderCommand& cmd)\n{    \n    RenderTexture* vrPresentationTexture = nullptr;\n#ifdef MARATHON_RECOMP_VR\n    const int32_t vrCaptureRequest = TakeVRCaptureRequest();\n#endif\n")
 _mr_vr_replace(_mr_vr_video "selecting the desktop presentation texture"
     "        auto swapChainTexture = g_swapChain->getTexture(g_backBufferIndex);"
     "        auto swapChainTexture = g_swapChain->getTexture(g_backBufferIndex);\n        vrPresentationTexture = swapChainTexture;")
+
+# Capture the composed image on its way to PRESENT, from whichever of the two
+# presentation paths this frame took.
+_mr_vr_replace(_mr_vr_video "capturing the composed image for VR"
+    "            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::PRESENT));"
+    "#ifdef MARATHON_RECOMP_VR\n            if (vrCaptureRequest != -2)\n            {\n                commandList->barriers(RenderBarrierStage::COPY,\n                    RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COPY_SOURCE));\n                CaptureVRPresentedImage(swapChainTexture,\n                    g_swapChain->getWidth(), g_swapChain->getHeight(), vrCaptureRequest);\n            }\n#endif\n            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::PRESENT));")
+_mr_vr_replace(_mr_vr_video "capturing the direct back buffer for VR"
+    "        else\n        {\n            AddBarrier(g_backBuffer, RenderTextureLayout::PRESENT);\n            FlushBarriers();\n        }"
+    "        else\n        {\n#ifdef MARATHON_RECOMP_VR\n            if (vrCaptureRequest != -2 && g_backBuffer->format == BACKBUFFER_FORMAT)\n            {\n                AddBarrier(g_backBuffer, RenderTextureLayout::COPY_SOURCE);\n                FlushBarriers();\n                CaptureVRPresentedImage(g_backBuffer->texture,\n                    g_backBuffer->width, g_backBuffer->height, vrCaptureRequest);\n            }\n#endif\n            AddBarrier(g_backBuffer, RenderTextureLayout::PRESENT);\n            FlushBarriers();\n        }")
 _mr_vr_replace(_mr_vr_video "submitting stereo sources to OpenXR"
     "    g_commandListStates[g_frame] = true;"
     "#ifdef MARATHON_RECOMP_VR\n    VR::SubmitFrame(\n        vrPresentationTexture,\n        g_vrEyeCaptureTextures[0].get(),\n        g_vrEyeCaptureTextures[1].get(),\n        (g_swapChainValid && g_swapChain != nullptr) ? g_swapChain->getWidth() : 0,\n        (g_swapChainValid && g_swapChain != nullptr) ? g_swapChain->getHeight() : 0);\n#endif\n\n    g_commandListStates[g_frame] = true;")

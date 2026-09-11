@@ -20,7 +20,7 @@ def unescape(cmake_string):
         c = cmake_string[i]
         if c == '\\' and i + 1 < len(cmake_string):
             nxt = cmake_string[i + 1]
-            out.append({'n': '\n', 't': '\t', '"': '"', '\\': '\\'}.get(nxt, '\\' + nxt))
+            out.append({'n': '\n', 't': '\t', 'r': '\r', ';': ';'}.get(nxt, nxt))
             i += 2
         else:
             out.append(c)

@@ -41,8 +41,9 @@ The OpenXR frame loop runs on the render thread inside `ProcExecuteCommandList`,
 
 Eye capture is driven by the renderer, not by the guest:
 
-- `ProcExecuteCommandList` captures the finished frame into **both** eyes on every Present while `VR::WantsEyeCapture()` is true. The guest render hook arming a specific eye only *upgrades* that to a per-eye stereo capture. Making the headset image depend on the guest hook meant a whole session could capture two frames and then reproject the same stale image forever.
-- The capture reads `g_backBuffer`. With DLSS compiled in, it uses the DLSS gamma scaler only once Streamline has produced a render extent; while `g_dlssRenderWidth`/`Height` are still zero the scaler resolves an empty source rectangle and every eye image comes out black, so the capture falls back to the ordinary gamma pass.
+- `ProcExecuteCommandList` copies the finished presented image into **both** eyes on every Present while `VR::WantsEyeCapture()` is true. The guest render hook arming a specific eye only *upgrades* that to a per-eye stereo capture. Making the headset image depend on the guest hook meant a whole session could capture two frames and then reproject the same stale image forever.
+- The capture is a **pure copy**, taken from the swapchain image on its way to `PRESENT`. It binds no framebuffer, pipeline, viewport or scissor, so it cannot disturb the renderer state the guest is relying on — an earlier shader-pass capture did, and once it ran every frame instead of occasionally it showed up as wrongly scaled menus on the desktop as well as in the headset.
+- Copying the presented image also means the headset shows exactly what the monitor shows, after gamma correction and any DLSS upscale, with no dependency on DLSS state. The earlier capture fed `g_dlssRenderWidth`/`Height` into the DLSS gamma scaler, which resolves an empty source rectangle — a black eye image — whenever Streamline has not initialised.
 
 The eye captures are `B8G8R8A8_UNORM`, and the OpenXR swapchain is requested as `B8G8R8A8_UNORM`. Runtimes are free to back that with any member of the same typeless family (VDXR hands back a shared, typeless resource), so the copy checks DXGI *family* compatibility rather than an exact `DXGI_FORMAT` match.
 
