@@ -2,13 +2,12 @@
 // dlss_video_runtime.inl. DLSS-G consumes its tagged inputs during Present(),
 // so keep dedicated Present-lifetime images alive until that call.
 //
-// The guest renders Sonic 06's own HUD before host ImGui.  A post-DLSS copy is
-// therefore not actually HUD-less.  Track the point where the depth-backed 3D
+// The guest renders Sonic 06's own HUD before host ImGui. A post-DLSS copy is
+// therefore not actually HUD-less. Track the point where the depth-backed 3D
 // scene has retired and snapshot the logical backbuffer immediately before the
-// first alpha-blended, non-depth-writing guest draw.  That snapshot is then
-// spatially scaled/gamma-corrected to the swap-chain extent and tagged as the
-// DLSS-G HUDLessColor.  If the boundary cannot be found, retain the old safe
-// fallback and report that fact in the DLSS-G status line.
+// first alpha-blended, non-depth-writing guest draw. After DLSS SR evaluates the
+// final guest image, build a full-resolution HUD-less image by replacing only
+// pixels changed by that HUD pass and generate a matching UI-alpha mask.
 
 static void SetRootDescriptor(const UploadAllocation& allocation, size_t index);
 
@@ -25,13 +24,17 @@ static uint32_t g_dlssFGGuestSceneHeight[NUM_FRAMES]{};
 static bool g_dlssFGGuestSceneCaptured;
 static bool g_dlssFGSceneDepthRetired;
 static bool g_dlssFGUsingSeparatedHudless;
+static bool g_dlssFGUsingUIAlpha;
 static uint32_t g_dlssFGHudBoundaryCandidateCount;
+
+#include "dlss_fg_ui_recompose.inl"
 
 static void DLSSFGHUDSeparationBeginFrame()
 {
     g_dlssFGGuestSceneCaptured = false;
     g_dlssFGSceneDepthRetired = false;
     g_dlssFGUsingSeparatedHudless = false;
+    g_dlssFGUsingUIAlpha = false;
     g_dlssFGHudBoundaryCandidateCount = 0;
 }
 
@@ -44,9 +47,9 @@ static void DLSSFGNotifyDepthBinding(GuestSurface* nextDepth)
         return;
     }
 
-    // This hook runs before g_depthStencil is changed.  Once the selected scene
+    // This hook runs before g_depthStencil is changed. Once the selected scene
     // depth is unbound, later alpha-blended/no-depth draws on the logical
-    // backbuffer are strong HUD candidates.  If the scene depth is rebound,
+    // backbuffer are strong HUD candidates. If the scene depth is rebound,
     // cancel the retirement state until it is retired again.
     if (nextDepth == g_dlssDepthCandidate)
     {
@@ -156,7 +159,6 @@ static void DLSSFGConsiderHUDStart()
     if (!g_dlssGameplayFrame ||
         Config::DLSSFrameGeneration == EDLSSFrameGeneration::Off ||
         g_dlssFGGuestSceneCaptured ||
-        !g_dlssFGSceneDepthRetired ||
         g_renderTarget == nullptr ||
         g_renderTarget != g_backBuffer ||
         g_backBuffer == nullptr ||
@@ -167,9 +169,13 @@ static void DLSSFGConsiderHUDStart()
 
     // Full-screen post-processing generally copies without alpha blending.
     // Sonic 06's HUD/dialogue pass is screen-space, alpha blended and does not
-    // write scene depth.  Snapshot immediately before the first such draw.
+    // write scene depth. Prefer the explicit scene-depth retirement signal, but
+    // also accept z-disabled screen-space rendering because some guest paths
+    // leave the old depth surface bound while disabling depth testing.
     const bool noSceneDepth = !g_pipelineState.zEnable || g_depthStencil == nullptr;
+    const bool sceneRetired = g_dlssFGSceneDepthRetired || !g_pipelineState.zEnable;
     const bool likelyGuestHUD =
+        sceneRetired &&
         noSceneDepth &&
         !g_pipelineState.zWriteEnable &&
         g_pipelineState.alphaBlendEnable;
@@ -241,13 +247,26 @@ static bool DLSSCaptureFGHudlessColor()
     RenderTexture* sourceTexture = g_dlssOutputTexture.get();
     uint32_t sourceDescriptorIndex = g_dlssOutputTextureDescriptorIndex;
     g_dlssFGUsingSeparatedHudless = false;
-    if (g_dlssFGGuestSceneCaptured &&
-        g_dlssFGGuestSceneTextures[g_frame] != nullptr &&
-        g_dlssFGGuestSceneDescriptorIndices[g_frame] != NULL)
+    g_dlssFGUsingUIAlpha = false;
+
+    // Build a corrected HUD-less scene only when we found a guest HUD boundary.
+    // The compose pass preserves the DLSS-resolved scene outside the UI mask and
+    // restores the pre-HUD background only beneath pixels changed by guest UI.
+    if (g_dlssFGGuestSceneCaptured && DLSSFGComposeSeparatedScene())
     {
-        sourceTexture = g_dlssFGGuestSceneTextures[g_frame].get();
-        sourceDescriptorIndex = g_dlssFGGuestSceneDescriptorIndices[g_frame];
+        sourceTexture = g_dlssFGSeparatedSceneTextures[g_frame].get();
+        sourceDescriptorIndex = g_dlssFGSeparatedSceneDescriptorIndices[g_frame];
         g_dlssFGUsingSeparatedHudless = true;
+
+        // Streamline requires UI buffers to match the intercepted backbuffer.
+        // The common case has viewport/output == swapchain. For letterboxed or
+        // otherwise mismatched windows keep the corrected HUDless input but do
+        // not tag an invalidly sized UI-alpha resource.
+        g_dlssFGUsingUIAlpha =
+            g_swapChain != nullptr &&
+            g_dlssOutputWidth == g_swapChain->getWidth() &&
+            g_dlssOutputHeight == g_swapChain->getHeight() &&
+            g_dlssFGUIAlphaTextures[g_frame] != nullptr;
     }
 
     struct GammaConstants
@@ -258,6 +277,8 @@ static bool DLSSCaptureFGHudlessColor()
         int32_t viewportOffsetY;
         int32_t viewportWidth;
         int32_t viewportHeight;
+        int32_t sourceWidth;
+        int32_t sourceHeight;
     } constants{};
 
     constants.gamma = 0.85f;
@@ -268,6 +289,8 @@ static bool DLSSCaptureFGHudlessColor()
     constants.viewportOffsetY = (int32_t(g_swapChain->getHeight()) - int32_t(Video::s_viewportHeight)) / 2;
     constants.viewportWidth = Video::s_viewportWidth;
     constants.viewportHeight = Video::s_viewportHeight;
+    constants.sourceWidth = int32_t(g_dlssOutputWidth);
+    constants.sourceHeight = int32_t(g_dlssOutputHeight);
 
     auto* commandList = g_commandLists[g_frame].get();
     auto* hudless = g_dlssFGHudlessTextures[g_frame].get();
@@ -278,7 +301,7 @@ static bool DLSSCaptureFGHudlessColor()
     };
     commandList->barriers(RenderBarrierStage::GRAPHICS, barriers, std::size(barriers));
     commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
-    commandList->setPipeline(g_gammaCorrectionPipeline.get());
+    commandList->setPipeline(DLSSGetGammaScalePipeline());
     commandList->setGraphicsDescriptorSet(g_textureDescriptorSet.get(), 0);
     SetRootDescriptor(g_uploadAllocators[g_frame].allocate<false>(&constants, sizeof(constants), 0x100), 2);
     commandList->setFramebuffer(g_dlssFGHudlessFramebuffers[g_frame].get());
@@ -325,6 +348,13 @@ static void DLSSFGPreparePresentInputs()
     resources.motionWidth = g_dlssRenderWidth;
     resources.motionHeight = g_dlssRenderHeight;
     resources.hudlessSeparated = g_dlssFGUsingSeparatedHudless;
+
+    if (g_dlssFGUsingUIAlpha)
+    {
+        resources.uiAlpha = g_dlssFGUIAlphaTextures[g_frame].get();
+        resources.uiWidth = g_dlssOutputWidth;
+        resources.uiHeight = g_dlssOutputHeight;
+    }
 
     if (!DLSS::PrepareFrameGenerationForPresent(frameIndex, resources))
         DLSSRenderer::SetStatus("DLSS FG inputs rejected; see DLSS FG status");
