@@ -92,7 +92,13 @@ namespace VR
 
         ID3D12Device* g_nativeDevice = nullptr;
         ID3D12CommandQueue* g_nativeQueue = nullptr;
-        ID3D12CommandAllocator* g_copyAllocator = nullptr;
+        // One allocator per in-flight copy. Resetting a single allocator every
+        // frame forced a full CPU wait for the GPU to drain, which serialises
+        // the whole renderer against the compositor.
+        static constexpr uint32_t kCopyFrameCount = 3;
+        ID3D12CommandAllocator* g_copyAllocators[kCopyFrameCount]{};
+        uint64_t g_copyFrameFenceValues[kCopyFrameCount]{};
+        uint32_t g_copyFrame = 0;
         ID3D12GraphicsCommandList* g_copyCommandList = nullptr;
         ID3D12Fence* g_copyFence = nullptr;
         HANDLE g_copyFenceEvent = nullptr;
@@ -137,12 +143,19 @@ namespace VR
         uint32_t g_lastEyeWidth = 0;
         uint32_t g_lastEyeHeight = 0;
         uint32_t g_lastEyeFormat = 0;
+        uint32_t g_desktopWidth = 0;
+        uint32_t g_desktopHeight = 0;
         uint64_t g_xrFrames = 0;
         uint32_t g_diagFrames = 0;
         std::atomic<uint64_t> g_renderHookCalls{ 0 };
         std::atomic<uint64_t> g_renderHookStereo{ 0 };
         std::atomic<uint64_t> g_captureRequests{ 0 };
         std::atomic<uint64_t> g_captureSkips{ 0 };
+        std::atomic<bool> g_poseValid{ false };
+        std::atomic<uint32_t> g_cameraSearchTotal{ 0 };
+        std::atomic<uint32_t> g_cameraSearchFound{ 0 };
+        std::atomic<uint32_t> g_cameraCandidates{ 0 };
+        std::atomic<uint32_t> g_cameraLayoutFailures{ 0 };
 
         ID3D12DescriptorHeap* g_testPatternRtvHeap = nullptr;
         uint32_t g_rtvDescriptorSize = 0;
@@ -150,6 +163,31 @@ namespace VR
         EVRMode CurrentMode()
         {
             return static_cast<EVRMode>(g_mode.load(std::memory_order_relaxed));
+        }
+
+        // MARATHON_VR_MODE forces a mode without going through the in-game
+        // menu, which is useful when the menu itself is hard to read in the
+        // headset. Accepts screen/virtual/0 and immersive/360/1.
+        const EVRMode* ModeOverride()
+        {
+            static EVRMode mode{};
+            static const EVRMode* result = []() -> const EVRMode*
+            {
+                const char* value = std::getenv("MARATHON_VR_MODE");
+                if (value == nullptr || value[0] == 0)
+                    return nullptr;
+                if (value[0] == '1' || value[0] == 'i' || value[0] == 'I' ||
+                    value[0] == '3' || value[0] == 'a' || value[0] == 'A')
+                {
+                    mode = EVRMode::Immersive360;
+                }
+                else
+                {
+                    mode = EVRMode::VirtualScreen;
+                }
+                return &mode;
+            }();
+            return result;
         }
 
         void SetStatus(const char* format, ...)
@@ -607,11 +645,14 @@ namespace VR
 
         Sonicteam::SoX::Scenery::CameraImp* FindGameplayCamera()
         {
+            g_cameraSearchTotal.fetch_add(1, std::memory_order_relaxed);
             if (App::s_pApp == nullptr || App::s_pApp->m_pDoc.get() == nullptr)
                 return nullptr;
             auto* game = App::s_pApp->GetGame();
             if (game == nullptr || game->m_vvspCameras.empty())
                 return nullptr;
+            g_cameraCandidates.store(
+                static_cast<uint32_t>(game->m_vvspCameras[0].size()), std::memory_order_relaxed);
 
             Sonicteam::SoX::Scenery::CameraImp* bestCamera = nullptr;
             float bestScore = 1.0e9f;
@@ -639,6 +680,8 @@ namespace VR
                     bestCamera = camera;
                 }
             }
+            if (bestCamera != nullptr)
+                g_cameraSearchFound.fetch_add(1, std::memory_order_relaxed);
             return bestCamera;
         }
 
@@ -706,14 +749,17 @@ namespace VR
 
         bool CreateCopyContext()
         {
-            if (FAILED(g_nativeDevice->CreateCommandAllocator(
-                    D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_copyAllocator))))
+            for (auto& allocator : g_copyAllocators)
             {
-                SetStatus("failed to create VR D3D12 command allocator");
-                return false;
+                if (FAILED(g_nativeDevice->CreateCommandAllocator(
+                        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
+                {
+                    SetStatus("failed to create VR D3D12 command allocator");
+                    return false;
+                }
             }
             if (FAILED(g_nativeDevice->CreateCommandList(
-                    0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_copyAllocator, nullptr,
+                    0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_copyAllocators[0], nullptr,
                     IID_PPV_ARGS(&g_copyCommandList))))
             {
                 SetStatus("failed to create VR D3D12 command list");
@@ -964,6 +1010,7 @@ namespace VR
             std::lock_guard lock(g_poseMutex);
             g_latestPose = {};
             g_activeRenderPose = {};
+            g_poseValid.store(false, std::memory_order_release);
         }
 
         void PollEvents()
@@ -1011,11 +1058,51 @@ namespace VR
 
         bool WaitForCopyFence(uint64_t value)
         {
-            if (g_copyFence->GetCompletedValue() >= value)
+            if (value == 0 || g_copyFence->GetCompletedValue() >= value)
                 return true;
             if (FAILED(g_copyFence->SetEventOnCompletion(value, g_copyFenceEvent)))
                 return false;
             return WaitForSingleObject(g_copyFenceEvent, INFINITE) == WAIT_OBJECT_0;
+        }
+
+        ID3D12GraphicsCommandList* BeginCopyCommandList()
+        {
+            g_copyFrame = (g_copyFrame + 1) % kCopyFrameCount;
+            if (!WaitForCopyFence(g_copyFrameFenceValues[g_copyFrame]))
+            {
+                Warn("failed waiting for a VR copy command allocator to retire");
+                return nullptr;
+            }
+            if (FAILED(g_copyAllocators[g_copyFrame]->Reset()) ||
+                FAILED(g_copyCommandList->Reset(g_copyAllocators[g_copyFrame], nullptr)))
+            {
+                Warn("failed to reset the VR copy command list");
+                return nullptr;
+            }
+            return g_copyCommandList;
+        }
+
+        // Submit without a CPU wait. OpenXR synchronises against the same D3D12
+        // queue the session was created with, so the runtime orders its own
+        // work after this submission; blocking the render thread until the GPU
+        // drains just costs frame rate.
+        bool EndCopyCommandList()
+        {
+            if (FAILED(g_copyCommandList->Close()))
+            {
+                Warn("failed to close the VR copy command list");
+                return false;
+            }
+            ID3D12CommandList* lists[] = { g_copyCommandList };
+            g_nativeQueue->ExecuteCommandLists(1, lists);
+            const uint64_t fenceValue = ++g_copyFenceValue;
+            if (FAILED(g_nativeQueue->Signal(g_copyFence, fenceValue)))
+            {
+                Warn("failed to signal the VR copy fence");
+                return false;
+            }
+            g_copyFrameFenceValues[g_copyFrame] = fenceValue;
+            return true;
         }
 
         bool CopyStereoToSwapchain(
@@ -1061,12 +1148,8 @@ namespace VR
                 }
             }
 
-            if (FAILED(g_copyAllocator->Reset()) ||
-                FAILED(g_copyCommandList->Reset(g_copyAllocator, nullptr)))
-            {
-                Warn("failed to reset the VR stereo copy command list");
+            if (BeginCopyCommandList() == nullptr)
                 return false;
-            }
 
             D3D12_RESOURCE_BARRIER destinationBarrier{};
             destinationBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1092,21 +1175,7 @@ namespace VR
 
             std::swap(destinationBarrier.Transition.StateBefore, destinationBarrier.Transition.StateAfter);
             g_copyCommandList->ResourceBarrier(1, &destinationBarrier);
-            if (FAILED(g_copyCommandList->Close()))
-            {
-                Warn("failed to close the VR stereo copy command list");
-                return false;
-            }
-
-            ID3D12CommandList* lists[] = { g_copyCommandList };
-            g_nativeQueue->ExecuteCommandLists(1, lists);
-            const uint64_t fenceValue = ++g_copyFenceValue;
-            if (FAILED(g_nativeQueue->Signal(g_copyFence, fenceValue)) || !WaitForCopyFence(fenceValue))
-            {
-                Warn("failed waiting for VR stereo copy completion");
-                return false;
-            }
-            return true;
+            return EndCopyCommandList();
         }
 
         bool AcquireAndCopyStereo(plume::RenderTexture* left, plume::RenderTexture* right)
@@ -1163,12 +1232,8 @@ namespace VR
             if (dst == nullptr)
                 return false;
 
-            if (FAILED(g_copyAllocator->Reset()) ||
-                FAILED(g_copyCommandList->Reset(g_copyAllocator, nullptr)))
-            {
-                Warn("failed to reset the VR test pattern command list");
+            if (BeginCopyCommandList() == nullptr)
                 return false;
-            }
 
             // Left eye red, right eye blue, so the log is not needed to tell
             // whether the two eyes are being routed correctly.
@@ -1193,20 +1258,7 @@ namespace VR
                 g_copyCommandList->ClearRenderTargetView(handle, eyeColors[eye], 0, nullptr);
             }
 
-            if (FAILED(g_copyCommandList->Close()))
-            {
-                Warn("failed to close the VR test pattern command list");
-                return false;
-            }
-            ID3D12CommandList* lists[] = { g_copyCommandList };
-            g_nativeQueue->ExecuteCommandLists(1, lists);
-            const uint64_t fenceValue = ++g_copyFenceValue;
-            if (FAILED(g_nativeQueue->Signal(g_copyFence, fenceValue)) || !WaitForCopyFence(fenceValue))
-            {
-                Warn("failed waiting for the VR test pattern to complete");
-                return false;
-            }
-            return true;
+            return EndCopyCommandList();
         }
 
         bool AcquireAndFillTestPattern()
@@ -1252,22 +1304,28 @@ namespace VR
             std::fprintf(stderr,
                 "[SlopVR][diag] xrFrames=%llu sessionState=%d shouldRender=%d mode=%u "
                 "stereoEngaged=%d captureMask=0x%x pose=%d content=%d layers=%u "
-                "swapchain=%ux%u actualFormat=%u eye=%ux%u format=%u "
+                "swapchain=%ux%u actualFormat=%u eye=%ux%u format=%u desktop=%ux%u "
                 "recommended=%ux%u maxEye=%ux%u blend=%d staleFrames=%u "
-                "renderHook=%llu stereoBranch=%llu captureRequests=%llu captureSkips=%llu\n",
+                "renderHook=%llu stereoBranch=%llu captureRequests=%llu captureSkips=%llu "
+                "cameraSearches=%u cameraFound=%u cameraCount=%u cameraLayoutFails=%u\n",
                 static_cast<unsigned long long>(g_xrFrames), static_cast<int>(g_sessionState),
                 frameState.shouldRender ? 1 : 0, static_cast<unsigned>(CurrentMode()),
                 g_stereoEngaged.load(std::memory_order_relaxed) ? 1 : 0, captureMask,
                 g_latestPose.valid ? 1 : 0, g_haveSubmittableContent ? 1 : 0, layerCount,
                 g_swapchainWidth, g_swapchainHeight, g_swapchainImageFormat,
                 g_lastEyeWidth, g_lastEyeHeight, g_lastEyeFormat,
+                g_desktopWidth, g_desktopHeight,
                 g_recommendedWidth, g_recommendedHeight,
                 g_maxSwapchainWidth, g_maxSwapchainHeight, static_cast<int>(g_blendMode),
                 g_framesSinceContentUpdate,
                 static_cast<unsigned long long>(g_renderHookCalls.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(g_renderHookStereo.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(g_captureRequests.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(g_captureSkips.load(std::memory_order_relaxed)));
+                static_cast<unsigned long long>(g_captureSkips.load(std::memory_order_relaxed)),
+                g_cameraSearchTotal.load(std::memory_order_relaxed),
+                g_cameraSearchFound.load(std::memory_order_relaxed),
+                g_cameraCandidates.load(std::memory_order_relaxed),
+                g_cameraLayoutFailures.load(std::memory_order_relaxed));
             std::fflush(stderr);
         }
 
@@ -1362,6 +1420,7 @@ namespace VR
                 return;
             std::lock_guard lock(g_poseMutex);
             g_latestPose = packet;
+            g_poseValid.store(true, std::memory_order_release);
         }
 
         void AnchorVirtualScreen(const PosePacket& pose)
@@ -1406,7 +1465,8 @@ namespace VR
 
     bool ShouldRenderStereoScene()
     {
-        const EVRMode requested = Config::VRMode.Value;
+        const EVRMode* const override = ModeOverride();
+        const EVRMode requested = override != nullptr ? *override : Config::VRMode.Value;
         const uint32_t requestedRaw = static_cast<uint32_t>(requested);
         const uint32_t previous = g_mode.exchange(requestedRaw, std::memory_order_relaxed);
         if (previous != requestedRaw)
@@ -1421,11 +1481,12 @@ namespace VR
             return false;
         }
 
-        std::lock_guard lock(g_poseMutex);
         // SubmitFrame uses this to know whether a guest frame produces one
-        // Present (monoscopic) or two (one per eye).
-        g_stereoEngaged.store(g_latestPose.valid, std::memory_order_relaxed);
-        return g_latestPose.valid;
+        // Present (monoscopic) or two (one per eye). Deliberately lock free:
+        // the DLSS viewport gate calls this once per draw call.
+        const bool poseValid = g_poseValid.load(std::memory_order_acquire);
+        g_stereoEngaged.store(poseValid, std::memory_order_relaxed);
+        return poseValid;
     }
 
     bool ApplyEyePose(uint32_t eye)
@@ -1455,6 +1516,7 @@ namespace VR
         CameraLayout layout{};
         if (!ResolveCameraLayout(*camera, layout))
         {
+            g_cameraLayoutFailures.fetch_add(1, std::memory_order_relaxed);
             Warn("VR stereo could not resolve Sonic 06 camera matrices");
             return false;
         }
@@ -1553,7 +1615,11 @@ namespace VR
         if (!g_initialized)
             return;
         if (desktopWidth != 0 && desktopHeight != 0)
+        {
             g_screenAspect.store(float(desktopWidth) / float(desktopHeight), std::memory_order_relaxed);
+            g_desktopWidth = desktopWidth;
+            g_desktopHeight = desktopHeight;
+        }
 
         PollEvents();
         if (!g_sessionRunning.load())
@@ -1701,9 +1767,14 @@ namespace VR
             if (mode == EVRMode::VirtualScreen)
             {
                 AnchorVirtualScreen(freshPose);
+                // Size the portal from the image actually being shown, not
+                // from the desktop swapchain. The capture is the game viewport,
+                // which need not match the window's aspect ratio.
+                const float contentAspect = g_contentHeight != 0
+                    ? float(g_contentWidth) / float(g_contentHeight)
+                    : g_screenAspect.load(std::memory_order_relaxed);
                 const float widthMeters = ScreenWidth();
-                const float heightMeters = widthMeters /
-                    std::max(0.25f, g_screenAspect.load(std::memory_order_relaxed));
+                const float heightMeters = widthMeters / std::max(0.25f, contentAspect);
                 for (uint32_t eye = 0; eye < 2; eye++)
                 {
                     quadLayers[eye] = { XR_TYPE_COMPOSITION_LAYER_QUAD };
@@ -1830,10 +1901,13 @@ namespace VR
             g_copyCommandList->Release();
             g_copyCommandList = nullptr;
         }
-        if (g_copyAllocator != nullptr)
+        for (auto& allocator : g_copyAllocators)
         {
-            g_copyAllocator->Release();
-            g_copyAllocator = nullptr;
+            if (allocator != nullptr)
+            {
+                allocator->Release();
+                allocator = nullptr;
+            }
         }
         if (g_testPatternRtvHeap != nullptr)
         {

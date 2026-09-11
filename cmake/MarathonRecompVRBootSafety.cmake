@@ -110,8 +110,7 @@ set(_MR_VR_CAPTURE_EXEC_NEW [=[    if (requestedVREye >= 0 && requestedVREye < 2
         vrCaptureCommand.type = RenderCommandType::CaptureVREye;
         vrCaptureCommand.captureVREye.eye = 0;
         ProcCaptureVREye(vrCaptureCommand);
-        vrCaptureCommand.captureVREye.eye = 1;
-        ProcCaptureVREye(vrCaptureCommand);
+        ProcDuplicateVREye();
     }]=])
 _mr_vr_boot_replace(_mr_vr_boot_video "capturing one non-gameplay frame into both eyes"
     "${_MR_VR_CAPTURE_EXEC_OLD}" "${_MR_VR_CAPTURE_EXEC_NEW}")

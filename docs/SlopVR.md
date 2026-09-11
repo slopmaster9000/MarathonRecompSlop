@@ -35,6 +35,10 @@ The guest renderer drives everything, so `VR::SubmitFrame` is called from the re
 - A frame without a fresh capture resubmits the last image that copied successfully rather than ending the frame with an empty layer list, so hitches reproject instead of flashing black.
 - Changing VR Mode re-anchors the presentation but keeps the OpenXR swapchain, because recreating it costs several frames during which nothing can be presented.
 
+The OpenXR frame loop runs on the render thread inside `ProcExecuteCommandList`, so `xrWaitFrame` paces the renderer to the compositor. Submission work must therefore stay off the critical path: the swapchain copy uses a ring of command allocators and signals a fence without ever waiting on it, because the runtime orders its own work against the same D3D12 queue the session was created with. Blocking the render thread until the GPU drains costs frame rate for nothing.
+
+`ShouldRenderStereoScene()` is also called from the DLSS viewport gate, which runs **once per draw call**, so it must stay lock free.
+
 Eye capture is driven by the renderer, not by the guest:
 
 - `ProcExecuteCommandList` captures the finished frame into **both** eyes on every Present while `VR::WantsEyeCapture()` is true. The guest render hook arming a specific eye only *upgrades* that to a per-eye stereo capture. Making the headset image depend on the guest hook meant a whole session could capture two frames and then reproject the same stale image forever.
@@ -45,6 +49,7 @@ The eye captures are `B8G8R8A8_UNORM`, and the OpenXR swapchain is requested as 
 ## Useful environment variables
 
 - `MARATHON_VR=0` disables the OpenXR runtime while leaving the VR build otherwise intact.
+- `MARATHON_VR_MODE=screen` or `MARATHON_VR_MODE=immersive` forces a VR mode without going through the in-game menu, which is useful while the menu is hard to read in the headset. It overrides the persisted `VRMode` setting for that run.
 - `MARATHON_VR_TEST_PATTERN=1` ignores the game image entirely and submits flat colours instead: **left eye red, right eye blue**, at the runtime's recommended eye size. See the troubleshooting section below.
 - `MARATHON_VR_TRACE=1` prints a per-frame trace of session states, swapchain creation, eye captures and `xrEndFrame` layer counts to stderr. `MARATHON_VR_TRACE=<n>` sets the line budget explicitly (the default allows a long session; the boot logos alone use several hundred lines).
 - `MARATHON_VR_SCREEN_DISTANCE` (default `2.0`) and `MARATHON_VR_SCREEN_WIDTH` (default `2.4`) size and place the Virtual Screen portal, in meters.
@@ -90,6 +95,8 @@ Then read the log:
 - `layers=0` with `content=0` means the frame loop is alive but has nothing to show.
 - `staleFrames` climbing while `layers=1` means the headset is showing a **frozen** image, which looks exactly like a broken one when the captured frame happened to be a loading screen.
 - `renderHook` versus `captureRequests` separates "the guest render hook never ran" from "it ran but never asked for a capture".
+- `cameraSearches`, `cameraFound`, `cameraCount` and `cameraLayoutFails` cover the stereo path. Stereo needs a gameplay `CameraImp`; when none is found the frame is captured monoscopically into both eyes instead, which looks correct but flat.
+- `eye=` versus `desktop=` shows the captured game viewport against the window size. They differ whenever the game is letterboxed into the window.
 - `no VR eye capture has reached OpenXR after 600 frames` and `VR eye capture has not refreshed for 600 frames` say the same things in one line.
 - `VR eye image WxH exceeds the OpenXR limit` means the game resolution is larger than the runtime's maximum eye image; lower it.
 - Every submission failure reports itself once per distinct reason, to stderr and to the F1 profiler `VR` row.

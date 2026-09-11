@@ -321,6 +321,36 @@ static void ProcCaptureVREye(const RenderCommand& cmd)
     InvalidateAfterVRCapture();
     VR::MarkEyeCaptured(eye);
 }
+
+// The monoscopic path needs the same image in both eyes. A texture copy is far
+// cheaper than running the capture pass twice, and this runs on every Present.
+static void ProcDuplicateVREye()
+{
+    if (!EnsureVREyeCapture(1, g_vrEyeCaptureWidths[0], g_vrEyeCaptureHeights[0]))
+    {
+        VR::NoteCaptureSkipped();
+        return;
+    }
+
+    RenderTexture* source = g_vrEyeCaptureTextures[0].get();
+    RenderTexture* destination = g_vrEyeCaptureTextures[1].get();
+    if (source == nullptr || destination == nullptr)
+    {
+        VR::NoteCaptureSkipped();
+        return;
+    }
+
+    auto& commandList = g_commandLists[g_frame];
+    commandList->barriers(RenderBarrierStage::COPY,
+        RenderTextureBarrier(destination, RenderTextureLayout::COPY_DEST));
+    commandList->copyTextureRegion(
+        RenderTextureCopyLocation::Subresource(destination, 0),
+        RenderTextureCopyLocation::Subresource(source, 0),
+        0, 0, 0, nullptr);
+    commandList->barriers(RenderBarrierStage::COPY,
+        RenderTextureBarrier(destination, RenderTextureLayout::COPY_SOURCE));
+    VR::MarkEyeCaptured(1);
+}
 #endif
 ]=])
 
