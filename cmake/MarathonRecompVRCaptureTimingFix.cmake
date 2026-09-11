@@ -91,7 +91,17 @@ set(_MR_VR_PROC_EXECUTE_REPLACEMENT [=[static void ProcExecuteCommandList(const 
 #ifdef MARATHON_RECOMP_VR
     // Capture the eye that was armed before this guest render. At this point
     // every draw for the current Sonic 06 Present has already been recorded.
-    const int32_t requestedVREye = g_vrCaptureEyeRequest.exchange(-1, std::memory_order_acq_rel);
+    int32_t requestedVREye = g_vrCaptureEyeRequest.exchange(-1, std::memory_order_acq_rel);
+    if (requestedVREye < 0 && VR::WantsEyeCapture())
+    {
+        // Nothing armed this Present. Mirror the finished frame into both eyes
+        // anyway. The headset must always show what the desktop shows; stereo
+        // is an upgrade on top of that, never a precondition for seeing
+        // anything at all. Relying on the guest render hook to arm every frame
+        // made a whole session present two captured frames and then reproject
+        // the same stale image forever.
+        requestedVREye = 2;
+    }
     if (requestedVREye >= 0 && requestedVREye < 2)
     {
         RenderCommand vrCaptureCommand{};

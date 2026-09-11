@@ -22,6 +22,8 @@
 4. Keep using your normal Xbox/PlayStation-compatible gamepad exactly as in the desktop build.
 5. Open the F1 profiler in MarathonRecomp and check the `VR` row. A healthy session progresses from `OpenXR initialized` to `OpenXR session running` and then `OpenXR active`.
 
+The SlopVR layers generate their sources by exact string replacement against each other's output, so editing `app.cpp`, `gpu/video.cpp` or any `cmake/MarathonRecompVR*.cmake` can break a downstream anchor — which otherwise only surfaces as a configure-time `FATAL_ERROR` on Windows. `python3 tools/slopvr_patch_check.py` replays the chain from any platform and reports which patch failed.
+
 For the DLSS build, keep the existing DLSS options enabled; `MarathonRecompVR.cmake` runs after the DLSS source-generation chain and wraps the final generated renderer. Each eye is captured before DLSS temporal evaluation, because a single temporal history cannot represent two cameras rendered inside one game frame.
 
 ## Frame submission model
@@ -32,6 +34,11 @@ The guest renderer drives everything, so `VR::SubmitFrame` is called from the re
 - That preference is **not** a dependency. If the pair does not arrive, a watchdog runs the OpenXR frame anyway after two presents. An OpenXR frame loop that stops calling `xrWaitFrame`/`xrEndFrame` is exactly what makes a headset go solid black while the desktop keeps rendering.
 - A frame without a fresh capture resubmits the last image that copied successfully rather than ending the frame with an empty layer list, so hitches reproject instead of flashing black.
 - Changing VR Mode re-anchors the presentation but keeps the OpenXR swapchain, because recreating it costs several frames during which nothing can be presented.
+
+Eye capture is driven by the renderer, not by the guest:
+
+- `ProcExecuteCommandList` captures the finished frame into **both** eyes on every Present while `VR::WantsEyeCapture()` is true. The guest render hook arming a specific eye only *upgrades* that to a per-eye stereo capture. Making the headset image depend on the guest hook meant a whole session could capture two frames and then reproject the same stale image forever.
+- The capture reads `g_backBuffer`. With DLSS compiled in, it uses the DLSS gamma scaler only once Streamline has produced a render extent; while `g_dlssRenderWidth`/`Height` are still zero the scaler resolves an empty source rectangle and every eye image comes out black, so the capture falls back to the ordinary gamma pass.
 
 The eye captures are `B8G8R8A8_UNORM`, and the OpenXR swapchain is requested as `B8G8R8A8_UNORM`. Runtimes are free to back that with any member of the same typeless family (VDXR hands back a shared, typeless resource), so the copy checks DXGI *family* compatibility rather than an exact `DXGI_FORMAT` match.
 
@@ -78,10 +85,12 @@ This submits flat colours generated directly into the OpenXR swapchain. The game
 
 Then read the log:
 
-- While nothing has reached the headset, a `[SlopVR][diag]` line is printed every few hundred frames with the whole state on one line: session state, `shouldRender`, VR mode, whether stereo is engaged, the eye capture mask, whether a pose and content exist, the layer count, the swapchain size and the format the runtime *actually* returned, the eye texture size and format, and the runtime's recommended and maximum eye sizes.
+- While nothing has reached the headset **or the image has stopped refreshing**, a `[SlopVR][diag]` line is printed every few hundred frames with the whole state on one line: session state, `shouldRender`, VR mode, whether stereo is engaged, the eye capture mask, whether a pose and content exist, the layer count, the swapchain size and the format the runtime *actually* returned, the eye texture size and format, the runtime's recommended and maximum eye sizes, how many frames the image has been stale, and counters for the guest render hook, its stereo branch, capture requests and capture skips.
 - `captureMask=0x0` means the renderer never captured an eye, so the problem is upstream of OpenXR.
 - `layers=0` with `content=0` means the frame loop is alive but has nothing to show.
-- `no VR eye capture has reached OpenXR after 600 frames` says the same thing in one line.
+- `staleFrames` climbing while `layers=1` means the headset is showing a **frozen** image, which looks exactly like a broken one when the captured frame happened to be a loading screen.
+- `renderHook` versus `captureRequests` separates "the guest render hook never ran" from "it ran but never asked for a capture".
+- `no VR eye capture has reached OpenXR after 600 frames` and `VR eye capture has not refreshed for 600 frames` say the same things in one line.
 - `VR eye image WxH exceeds the OpenXR limit` means the game resolution is larger than the runtime's maximum eye image; lower it.
 - Every submission failure reports itself once per distinct reason, to stderr and to the F1 profiler `VR` row.
 

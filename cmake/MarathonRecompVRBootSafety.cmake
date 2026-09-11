@@ -81,7 +81,10 @@ void VR::CaptureEye(uint32_t eye)
 {
     // 0/1 = one stereo eye, 2 = one normal frame duplicated to both eyes.
     if (eye <= 2)
+    {
+        VR::NoteCaptureRequest(eye);
         g_vrCaptureEyeRequest.store(static_cast<int32_t>(eye), std::memory_order_release);
+    }
 }
 #endif]=])
 _mr_vr_boot_replace(_mr_vr_boot_video "allowing the mono-to-both-eyes capture sentinel"

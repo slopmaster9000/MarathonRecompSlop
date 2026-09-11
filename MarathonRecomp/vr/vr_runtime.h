@@ -30,6 +30,20 @@ namespace VR
     bool ApplyEyePose(uint32_t eye);
     void RestoreGameCamera();
 
+    // True while OpenXR is running and wants images. The renderer uses this to
+    // capture every Present into both eyes even when the guest render hook did
+    // not arm a specific eye, so the headset always shows what the desktop
+    // shows. Stereo is an upgrade on top of that, never a precondition for
+    // seeing anything at all.
+    bool WantsEyeCapture();
+
+    // Instrumentation behind the black-headset diagnostic line: how often the
+    // guest render hook ran, how often it took the stereo branch, how many
+    // captures were requested, and how many were skipped by the renderer.
+    void NoteRenderHook(bool stereoBranch);
+    void NoteCaptureRequest(uint32_t eye);
+    void NoteCaptureSkipped();
+
     // Implemented in the VR-generated video.cpp. CaptureEye inserts a renderer
     // command exactly between the left and right guest passes; MarkEyeCaptured
     // is called only after that render-thread capture succeeds.

@@ -127,6 +127,7 @@ namespace VR
         std::atomic<bool> g_stereoEngaged = false;
         uint32_t g_presentsSinceXrFrame = 0;
         uint32_t g_framesWithoutContent = 0;
+        uint32_t g_framesSinceContentUpdate = 0;
 
         // Everything the periodic diagnostic line needs. A black headset is
         // almost always answered by one of these fields.
@@ -138,6 +139,10 @@ namespace VR
         uint32_t g_lastEyeFormat = 0;
         uint64_t g_xrFrames = 0;
         uint32_t g_diagFrames = 0;
+        std::atomic<uint64_t> g_renderHookCalls{ 0 };
+        std::atomic<uint64_t> g_renderHookStereo{ 0 };
+        std::atomic<uint64_t> g_captureRequests{ 0 };
+        std::atomic<uint64_t> g_captureSkips{ 0 };
 
         ID3D12DescriptorHeap* g_testPatternRtvHeap = nullptr;
         uint32_t g_rtvDescriptorSize = 0;
@@ -954,6 +959,7 @@ namespace VR
             g_haveContentViews = false;
             g_presentsSinceXrFrame = 0;
             g_framesWithoutContent = 0;
+            g_framesSinceContentUpdate = 0;
             g_modeChangePending = true;
             std::lock_guard lock(g_poseMutex);
             g_latestPose = {};
@@ -1233,7 +1239,8 @@ namespace VR
         // it, so a single captured log answers "why is the headset black".
         void ReportDiagnostics(uint32_t captureMask, uint32_t layerCount, const XrFrameState& frameState)
         {
-            if (g_presentedFrames != 0)
+            const bool stalled = g_presentedFrames == 0 || g_framesSinceContentUpdate >= 120;
+            if (!stalled)
             {
                 g_diagFrames = 0;
                 return;
@@ -1246,7 +1253,8 @@ namespace VR
                 "[SlopVR][diag] xrFrames=%llu sessionState=%d shouldRender=%d mode=%u "
                 "stereoEngaged=%d captureMask=0x%x pose=%d content=%d layers=%u "
                 "swapchain=%ux%u actualFormat=%u eye=%ux%u format=%u "
-                "recommended=%ux%u maxEye=%ux%u blend=%d\n",
+                "recommended=%ux%u maxEye=%ux%u blend=%d staleFrames=%u "
+                "renderHook=%llu stereoBranch=%llu captureRequests=%llu captureSkips=%llu\n",
                 static_cast<unsigned long long>(g_xrFrames), static_cast<int>(g_sessionState),
                 frameState.shouldRender ? 1 : 0, static_cast<unsigned>(CurrentMode()),
                 g_stereoEngaged.load(std::memory_order_relaxed) ? 1 : 0, captureMask,
@@ -1254,7 +1262,12 @@ namespace VR
                 g_swapchainWidth, g_swapchainHeight, g_swapchainImageFormat,
                 g_lastEyeWidth, g_lastEyeHeight, g_lastEyeFormat,
                 g_recommendedWidth, g_recommendedHeight,
-                g_maxSwapchainWidth, g_maxSwapchainHeight, static_cast<int>(g_blendMode));
+                g_maxSwapchainWidth, g_maxSwapchainHeight, static_cast<int>(g_blendMode),
+                g_framesSinceContentUpdate,
+                static_cast<unsigned long long>(g_renderHookCalls.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_renderHookStereo.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_captureRequests.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_captureSkips.load(std::memory_order_relaxed)));
             std::fflush(stderr);
         }
 
@@ -1497,6 +1510,29 @@ namespace VR
         g_savedCamera = {};
     }
 
+    bool WantsEyeCapture()
+    {
+        return g_initialized && g_sessionRunning.load(std::memory_order_relaxed);
+    }
+
+    void NoteRenderHook(bool stereoBranch)
+    {
+        g_renderHookCalls.fetch_add(1, std::memory_order_relaxed);
+        if (stereoBranch)
+            g_renderHookStereo.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void NoteCaptureRequest(uint32_t eye)
+    {
+        (void)eye;
+        g_captureRequests.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void NoteCaptureSkipped()
+    {
+        g_captureSkips.fetch_add(1, std::memory_order_relaxed);
+    }
+
     void MarkEyeCaptured(uint32_t eye)
     {
         if (eye < 2)
@@ -1568,6 +1604,7 @@ namespace VR
             frameState.shouldRender ? 1 : 0, freshPose.valid ? 1 : 0);
 
         ++g_xrFrames;
+        bool contentRefreshed = false;
 
         // MARATHON_VR_TEST_PATTERN=1 bypasses the game entirely: it fills the
         // swapchain with flat per-eye colours at the runtime's recommended eye
@@ -1581,6 +1618,8 @@ namespace VR
             {
                 g_haveSubmittableContent = true;
                 g_framesWithoutContent = 0;
+                g_framesSinceContentUpdate = 0;
+                contentRefreshed = true;
                 g_contentWidth = width;
                 g_contentHeight = height;
             }
@@ -1614,6 +1653,8 @@ namespace VR
                 {
                     g_haveSubmittableContent = true;
                     g_framesWithoutContent = 0;
+                    g_framesSinceContentUpdate = 0;
+                    contentRefreshed = true;
                     g_contentWidth = eyeWidth;
                     g_contentHeight = eyeHeight;
 
@@ -1631,6 +1672,16 @@ namespace VR
             Warn("no VR eye capture has reached OpenXR after 600 frames "
                  "(stereo engaged=%d, capture mask=0x%x); the headset stays black",
                 g_stereoEngaged.load(std::memory_order_relaxed) ? 1 : 0, captureMask);
+        }
+
+        // A frozen image reports as a perfectly healthy frame loop but looks
+        // identical to a broken one in the headset, especially when the frame
+        // that got captured was a loading screen.
+        if (!contentRefreshed && g_haveSubmittableContent &&
+            ++g_framesSinceContentUpdate == 600)
+        {
+            Warn("VR eye capture has not refreshed for 600 frames "
+                 "(capture mask=0x%x); the headset is showing a frozen image", captureMask);
         }
 
         std::array<const XrCompositionLayerBaseHeader*, 2> layers{};
@@ -1798,6 +1849,7 @@ namespace VR
         g_contentWidth = 0;
         g_contentHeight = 0;
         g_presentsSinceXrFrame = 0;
+        g_framesSinceContentUpdate = 0;
         g_stereoEngaged.store(false, std::memory_order_relaxed);
         SetStatus("OpenXR shut down");
     }
@@ -1823,6 +1875,10 @@ namespace VR
 {
     bool SetD3D12Backend(plume::RenderDevice*, plume::RenderCommandQueue*) { return false; }
     bool ShouldRenderStereoScene() { return false; }
+    bool WantsEyeCapture() { return false; }
+    void NoteRenderHook(bool) { }
+    void NoteCaptureRequest(uint32_t) { }
+    void NoteCaptureSkipped() { }
     bool ApplyEyePose(uint32_t) { return false; }
     void RestoreGameCamera() { }
     void MarkEyeCaptured(uint32_t) { }

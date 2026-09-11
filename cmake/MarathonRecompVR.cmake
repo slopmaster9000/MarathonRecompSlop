@@ -113,7 +113,7 @@ _mr_vr_replace(_mr_vr_app "shutting OpenXR down on application exit"
     "void App::Exit()\n{\n#ifdef MARATHON_RECOMP_VR\n    VR::Shutdown();\n#endif\n    Config::Save();")
 _mr_vr_replace(_mr_vr_app "rendering separate immersive eyes"
     "    LOG_UTILITY(\"RenderFrame\");\n\n    __imp__sub_82744840(ctx, base);"
-    "    LOG_UTILITY(\"RenderFrame\");\n\n#ifdef MARATHON_RECOMP_VR\n    if (VR::ShouldRenderImmersiveStereo())\n    {\n        if (VR::ApplyEyePose(0))\n        {\n            __imp__sub_82744840(ctx, base);\n            VR::CaptureEye(0);\n            VR::RestoreGameCamera();\n\n            if (VR::ApplyEyePose(1))\n            {\n                __imp__sub_82744840(ctx, base);\n                VR::CaptureEye(1);\n                VR::RestoreGameCamera();\n                return;\n            }\n\n            VR::RestoreGameCamera();\n        }\n    }\n#endif\n\n    __imp__sub_82744840(ctx, base);")
+    "    LOG_UTILITY(\"RenderFrame\");\n\n#ifdef MARATHON_RECOMP_VR\n    const bool vrStereoFrame = VR::ShouldRenderImmersiveStereo();\n    VR::NoteRenderHook(vrStereoFrame);\n    if (vrStereoFrame)\n    {\n        if (VR::ApplyEyePose(0))\n        {\n            __imp__sub_82744840(ctx, base);\n            VR::CaptureEye(0);\n            VR::RestoreGameCamera();\n\n            if (VR::ApplyEyePose(1))\n            {\n                __imp__sub_82744840(ctx, base);\n                VR::CaptureEye(1);\n                VR::RestoreGameCamera();\n                return;\n            }\n\n            VR::RestoreGameCamera();\n        }\n    }\n#endif\n\n    __imp__sub_82744840(ctx, base);")
 
 # -----------------------------------------------------------------------------
 # Renderer hook: add an eye-capture render command. The captured textures are
@@ -205,16 +205,26 @@ static void ProcCaptureVREye(const RenderCommand& cmd)
     const uint32_t width = Video::s_viewportWidth;
     const uint32_t height = Video::s_viewportHeight;
     if (!EnsureVREyeCapture(eye, width, height) || g_backBuffer == nullptr || g_backBuffer->texture == nullptr)
+    {
+        VR::NoteCaptureSkipped();
         return;
+    }
 
     auto& commandList = g_commandLists[g_frame];
     RenderTexture* destination = g_vrEyeCaptureTextures[eye].get();
+    const bool viaIntermediary = g_backBuffer->texture == g_intermediaryBackBufferTexture.get();
+    bool captured = false;
 
 #ifdef MARATHON_RECOMP_DLSS
     // Immersive stereo deliberately captures the raw per-eye guest render before
     // DLSS temporal evaluation. A single temporal history cannot represent two
     // cameras rendered inside one game frame. The existing DLSS gamma scaler is
-    // still useful here as a high-quality spatial presentation pass.
+    // still useful here as a high-quality spatial presentation pass - but only
+    // once Streamline has actually produced a render extent. Before that (and
+    // when DLSS never initialises at all) g_dlssRenderWidth/Height are zero, the
+    // scaler samples an empty source rectangle, and every eye image is black.
+    if (viaIntermediary && g_dlssRenderWidth != 0 && g_dlssRenderHeight != 0)
+    {
     AddBarrier(g_backBuffer, RenderTextureLayout::SHADER_READ);
     FlushBarriers();
     commandList->barriers(RenderBarrierStage::GRAPHICS | RenderBarrierStage::COPY,
@@ -253,8 +263,11 @@ static void ProcCaptureVREye(const RenderCommand& cmd)
         RenderTextureBarrier(destination, RenderTextureLayout::COPY_SOURCE));
     AddBarrier(g_backBuffer, RenderTextureLayout::COLOR_WRITE);
     FlushBarriers();
-#else
-    if (g_backBuffer->texture == g_intermediaryBackBufferTexture.get())
+    captured = true;
+    }
+#endif
+
+    if (!captured && viaIntermediary)
     {
         AddBarrier(g_backBuffer, RenderTextureLayout::SHADER_READ);
         FlushBarriers();
@@ -289,7 +302,7 @@ static void ProcCaptureVREye(const RenderCommand& cmd)
         AddBarrier(g_backBuffer, RenderTextureLayout::COLOR_WRITE);
         FlushBarriers();
     }
-    else
+    else if (!captured)
     {
         AddBarrier(g_backBuffer, RenderTextureLayout::COPY_SOURCE);
         FlushBarriers();
@@ -304,7 +317,6 @@ static void ProcCaptureVREye(const RenderCommand& cmd)
         AddBarrier(g_backBuffer, RenderTextureLayout::COLOR_WRITE);
         FlushBarriers();
     }
-#endif
 
     InvalidateAfterVRCapture();
     VR::MarkEyeCaptured(eye);
