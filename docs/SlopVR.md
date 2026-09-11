@@ -38,20 +38,54 @@ The eye captures are `B8G8R8A8_UNORM`, and the OpenXR swapchain is requested as 
 ## Useful environment variables
 
 - `MARATHON_VR=0` disables the OpenXR runtime while leaving the VR build otherwise intact.
-- `MARATHON_VR_TRACE=1` prints a bounded per-frame trace of session states, swapchain creation, eye captures and `xrEndFrame` layer counts to stderr. Use this first when the headset shows nothing.
+- `MARATHON_VR_TEST_PATTERN=1` ignores the game image entirely and submits flat colours instead: **left eye red, right eye blue**, at the runtime's recommended eye size. See the troubleshooting section below.
+- `MARATHON_VR_TRACE=1` prints a per-frame trace of session states, swapchain creation, eye captures and `xrEndFrame` layer counts to stderr. `MARATHON_VR_TRACE=<n>` sets the line budget explicitly (the default allows a long session; the boot logos alone use several hundred lines).
 - `MARATHON_VR_SCREEN_DISTANCE` (default `2.0`) and `MARATHON_VR_SCREEN_WIDTH` (default `2.4`) size and place the Virtual Screen portal, in meters.
 - `MARATHON_VR_WORLD_SCALE` (default `1.0`) scales headset translation into Sonic 06 world units.
 - `MARATHON_VR_X_SIGN=-1`, `MARATHON_VR_Y_SIGN=-1`, or `MARATHON_VR_Z_SIGN=-1` flips an individual headset axis, in case Sonic 06's camera-local axes differ from the OpenXR mapping.
 
+## Capturing a log
+
+MarathonRecomp is built as `/SUBSYSTEM:WINDOWS`, so it has no console of its own. `stderr` still works if you redirect it when launching, from a `cmd` window in the folder containing `MarathonRecomp.exe`:
+
+```bat
+set MARATHON_VR_TRACE=1
+MarathonRecomp.exe 2> vr_stderr.txt
+```
+
+Two things will silently break that capture:
+
+- **`ShowConsole` must stay off.** With `[System] ShowConsole = true` in `%APPDATA%\MarathonRecomp\config.toml` (or next to the exe in a portable install), the game calls `AllocConsole` and reopens `stderr` onto that console, so the redirected file stays empty.
+- **Launching from Explorer or a shortcut** gives the process no `stderr` at all. It has to be started from the command line shown above.
+
+Play until the headset has been black for a while, then quit the game normally. Alongside `vr_stderr.txt`, `C:\ProgramData\Virtual Desktop\OpenXR.log` covers the runtime's side of the same session.
+
 ## Troubleshooting a black headset
 
-The desktop rendering fine tells you nothing about the headset: the two paths are independent. Work down this list.
+The desktop rendering fine tells you nothing about the headset: the two paths are independent, and the desktop image is presented before any of the OpenXR work happens.
 
-1. Check the F1 profiler `VR` row and stderr. Every submission failure now reports itself once; a healthy run ends at `OpenXR active`.
-2. If the log says `no VR eye capture has reached OpenXR after 600 frames`, the renderer never produced a pair. Re-run with `MARATHON_VR_TRACE=1` and look for `eye captured` lines.
-3. If the log names a swapchain format or size problem, it says which. `VR eye image WxH exceeds the OpenXR limit` means the game resolution is larger than the runtime's maximum eye image; lower it.
-4. `xrEndFrame layers=0` in the trace means the frame loop is alive but has nothing to show, which points at the capture path, not at OpenXR.
-5. Confirm Virtual Desktop Streamer is set to the **VDXR** runtime and that `C:\ProgramData\Virtual Desktop\OpenXR.log` shows `Creating a swapchain with texture array`.
+**Start here.** Run once with the test pattern:
+
+```bat
+set MARATHON_VR_TEST_PATTERN=1
+MarathonRecomp.exe 2> vr_testpattern.txt
+```
+
+This submits flat colours generated directly into the OpenXR swapchain. The game's renderer is not involved at all.
+
+- **Red in the left eye and blue in the right** means the session, swapchain, reference spaces, composition layers and eye routing are all correct, and the fault is in the eye-capture path.
+- **Still black** means submission itself never reaches the compositor, and the capture path is irrelevant.
+
+Then read the log:
+
+- While nothing has reached the headset, a `[SlopVR][diag]` line is printed every few hundred frames with the whole state on one line: session state, `shouldRender`, VR mode, whether stereo is engaged, the eye capture mask, whether a pose and content exist, the layer count, the swapchain size and the format the runtime *actually* returned, the eye texture size and format, and the runtime's recommended and maximum eye sizes.
+- `captureMask=0x0` means the renderer never captured an eye, so the problem is upstream of OpenXR.
+- `layers=0` with `content=0` means the frame loop is alive but has nothing to show.
+- `no VR eye capture has reached OpenXR after 600 frames` says the same thing in one line.
+- `VR eye image WxH exceeds the OpenXR limit` means the game resolution is larger than the runtime's maximum eye image; lower it.
+- Every submission failure reports itself once per distinct reason, to stderr and to the F1 profiler `VR` row.
+
+Also confirm Virtual Desktop Streamer is set to the **VDXR** runtime, and that `OpenXR.log` shows `Creating a swapchain with texture array`.
 
 ## Next rendering milestone
 

@@ -128,6 +128,20 @@ namespace VR
         uint32_t g_presentsSinceXrFrame = 0;
         uint32_t g_framesWithoutContent = 0;
 
+        // Everything the periodic diagnostic line needs. A black headset is
+        // almost always answered by one of these fields.
+        uint32_t g_recommendedWidth = 0;
+        uint32_t g_recommendedHeight = 0;
+        uint32_t g_swapchainImageFormat = 0;
+        uint32_t g_lastEyeWidth = 0;
+        uint32_t g_lastEyeHeight = 0;
+        uint32_t g_lastEyeFormat = 0;
+        uint64_t g_xrFrames = 0;
+        uint32_t g_diagFrames = 0;
+
+        ID3D12DescriptorHeap* g_testPatternRtvHeap = nullptr;
+        uint32_t g_rtvDescriptorSize = 0;
+
         EVRMode CurrentMode()
         {
             return static_cast<EVRMode>(g_mode.load(std::memory_order_relaxed));
@@ -165,14 +179,27 @@ namespace VR
             std::fflush(stderr);
         }
 
-        bool TraceEnabled()
+        // MARATHON_VR_TRACE=0/unset disables the trace, =1 allows a generous
+        // default, and any larger number sets the line budget explicitly. The
+        // budget exists so a long play session cannot fill a disk, but it must
+        // be large enough to still be recording once the game reaches
+        // gameplay - the boot logos alone burn several hundred lines.
+        uint32_t TraceBudget()
         {
-            static const bool enabled = []
+            static const uint32_t budget = []() -> uint32_t
             {
                 const char* value = std::getenv("MARATHON_VR_TRACE");
-                return value != nullptr && value[0] != 0 && value[0] != '0';
+                if (value == nullptr || value[0] == 0 || value[0] == '0')
+                    return 0;
+                const long parsed = std::strtol(value, nullptr, 10);
+                return parsed > 1 ? uint32_t(parsed) : 50000u;
             }();
-            return enabled;
+            return budget;
+        }
+
+        bool TraceEnabled()
+        {
+            return TraceBudget() != 0;
         }
 
         // Opt-in, bounded per-frame trace for hardware bring-up.
@@ -180,7 +207,7 @@ namespace VR
         {
             if (!TraceEnabled())
                 return;
-            static std::atomic<uint32_t> budget{ 600 };
+            static std::atomic<uint32_t> budget{ TraceBudget() };
             uint32_t remaining = budget.load(std::memory_order_relaxed);
             while (remaining != 0 &&
                    !budget.compare_exchange_weak(remaining, remaining - 1,
@@ -269,6 +296,37 @@ namespace VR
         bool CopyCompatible(DXGI_FORMAT a, DXGI_FORMAT b)
         {
             return TypelessFamily(a) == TypelessFamily(b);
+        }
+
+        // A typeless resource cannot be viewed without naming a concrete
+        // format, which the test-pattern render target view has to do.
+        DXGI_FORMAT ConcreteFormat(DXGI_FORMAT format)
+        {
+            switch (format)
+            {
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+                return DXGI_FORMAT_B8G8R8A8_UNORM;
+            case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+                return DXGI_FORMAT_B8G8R8X8_UNORM;
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
+            default:
+                return format;
+            }
+        }
+
+        // Submit a known-good image that does not involve the game at all.
+        // Seeing it proves the session, swapchain, spaces, layers and eye
+        // routing are all correct and moves the fault into the capture path;
+        // still seeing black proves the opposite.
+        bool TestPatternEnabled()
+        {
+            static const bool enabled = []
+            {
+                const char* value = std::getenv("MARATHON_VR_TEST_PATTERN");
+                return value != nullptr && value[0] != 0 && value[0] != '0';
+            }();
+            return enabled;
         }
 
         // The eye captures are BACKBUFFER_FORMAT (B8G8R8A8_UNORM). Accept any
@@ -770,6 +828,8 @@ namespace VR
                 return false;
             g_maxSwapchainWidth = std::min(viewConfig[0].maxImageRectWidth, viewConfig[1].maxImageRectWidth);
             g_maxSwapchainHeight = std::min(viewConfig[0].maxImageRectHeight, viewConfig[1].maxImageRectHeight);
+            g_recommendedWidth = std::max(viewConfig[0].recommendedImageRectWidth, viewConfig[1].recommendedImageRectWidth);
+            g_recommendedHeight = std::max(viewConfig[0].recommendedImageRectHeight, viewConfig[1].recommendedImageRectHeight);
 
             uint32_t blendCount = 0;
             if (XR_SUCCEEDED(xrEnumerateEnvironmentBlendModes(
@@ -869,8 +929,18 @@ namespace VR
             g_swapchainWidth = width;
             g_swapchainHeight = height;
             g_swapchainArraySize = arraySize;
-            Trace("swapchain ready %ux%u array=%u images=%u format=%lld",
-                width, height, arraySize, imageCount, static_cast<long long>(desiredFormat));
+
+            // What the runtime actually handed back, which is not necessarily
+            // the format that was requested.
+            g_swapchainImageFormat = 0;
+            if (!g_swapchainImages.empty() && g_swapchainImages[0].texture != nullptr)
+                g_swapchainImageFormat = unsigned(g_swapchainImages[0].texture->GetDesc().Format);
+
+            std::fprintf(stderr,
+                "[SlopVR] OpenXR swapchain ready: %ux%u array=%u images=%u requested format=%lld actual format=%u\n",
+                width, height, arraySize, imageCount,
+                static_cast<long long>(desiredFormat), g_swapchainImageFormat);
+            std::fflush(stderr);
             return true;
         }
 
@@ -1056,6 +1126,136 @@ namespace VR
                     "xrReleaseSwapchainImage"))
                 return false;
             return copied;
+        }
+
+        bool EnsureTestPatternHeap()
+        {
+            if (g_testPatternRtvHeap != nullptr)
+                return true;
+            D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+            heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            heapDesc.NumDescriptors = 2;
+            heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            if (FAILED(g_nativeDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&g_testPatternRtvHeap))))
+            {
+                Warn("failed to create the VR test pattern descriptor heap");
+                return false;
+            }
+            g_rtvDescriptorSize =
+                g_nativeDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            return true;
+        }
+
+        // Clear the two array slices to flat colours. The image is already in
+        // RENDER_TARGET state when OpenXR hands it over, so no barrier is
+        // needed and nothing here touches the game's renderer.
+        bool FillTestPattern(uint32_t imageIndex)
+        {
+            if (imageIndex >= g_swapchainImages.size() || !EnsureTestPatternHeap())
+                return false;
+            ID3D12Resource* dst = g_swapchainImages[imageIndex].texture;
+            if (dst == nullptr)
+                return false;
+
+            if (FAILED(g_copyAllocator->Reset()) ||
+                FAILED(g_copyCommandList->Reset(g_copyAllocator, nullptr)))
+            {
+                Warn("failed to reset the VR test pattern command list");
+                return false;
+            }
+
+            // Left eye red, right eye blue, so the log is not needed to tell
+            // whether the two eyes are being routed correctly.
+            static const float eyeColors[2][4] = {
+                { 0.65f, 0.06f, 0.06f, 1.0f },
+                { 0.06f, 0.15f, 0.75f, 1.0f },
+            };
+            const D3D12_CPU_DESCRIPTOR_HANDLE heapStart =
+                g_testPatternRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            for (uint32_t eye = 0; eye < 2; eye++)
+            {
+                D3D12_RENDER_TARGET_VIEW_DESC viewDesc{};
+                viewDesc.Format = ConcreteFormat(dst->GetDesc().Format);
+                viewDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                viewDesc.Texture2DArray.MipSlice = 0;
+                viewDesc.Texture2DArray.FirstArraySlice = eye;
+                viewDesc.Texture2DArray.ArraySize = 1;
+                viewDesc.Texture2DArray.PlaneSlice = 0;
+
+                D3D12_CPU_DESCRIPTOR_HANDLE handle{ heapStart.ptr + size_t(eye) * g_rtvDescriptorSize };
+                g_nativeDevice->CreateRenderTargetView(dst, &viewDesc, handle);
+                g_copyCommandList->ClearRenderTargetView(handle, eyeColors[eye], 0, nullptr);
+            }
+
+            if (FAILED(g_copyCommandList->Close()))
+            {
+                Warn("failed to close the VR test pattern command list");
+                return false;
+            }
+            ID3D12CommandList* lists[] = { g_copyCommandList };
+            g_nativeQueue->ExecuteCommandLists(1, lists);
+            const uint64_t fenceValue = ++g_copyFenceValue;
+            if (FAILED(g_nativeQueue->Signal(g_copyFence, fenceValue)) || !WaitForCopyFence(fenceValue))
+            {
+                Warn("failed waiting for the VR test pattern to complete");
+                return false;
+            }
+            return true;
+        }
+
+        bool AcquireAndFillTestPattern()
+        {
+            uint32_t imageIndex = 0;
+            XrSwapchainImageAcquireInfo acquireInfo{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+            if (!CheckXr(xrAcquireSwapchainImage(g_colorSwapchain, &acquireInfo, &imageIndex),
+                    "xrAcquireSwapchainImage"))
+                return false;
+
+            XrSwapchainImageWaitInfo waitInfo{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+            waitInfo.timeout = XR_INFINITE_DURATION;
+            if (!CheckXr(xrWaitSwapchainImage(g_colorSwapchain, &waitInfo), "xrWaitSwapchainImage"))
+            {
+                XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+                xrReleaseSwapchainImage(g_colorSwapchain, &releaseInfo);
+                return false;
+            }
+
+            const bool filled = FillTestPattern(imageIndex);
+            XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+            if (!CheckXr(xrReleaseSwapchainImage(g_colorSwapchain, &releaseInfo),
+                    "xrReleaseSwapchainImage"))
+                return false;
+            return filled;
+        }
+
+        // While nothing has reached the headset, print one compact state line
+        // periodically. Every field needed to tell which stage is failing is on
+        // it, so a single captured log answers "why is the headset black".
+        void ReportDiagnostics(uint32_t captureMask, uint32_t layerCount, const XrFrameState& frameState)
+        {
+            if (g_presentedFrames != 0)
+            {
+                g_diagFrames = 0;
+                return;
+            }
+            ++g_diagFrames;
+            if (g_diagFrames != 60 && (g_diagFrames % 600) != 0)
+                return;
+
+            std::fprintf(stderr,
+                "[SlopVR][diag] xrFrames=%llu sessionState=%d shouldRender=%d mode=%u "
+                "stereoEngaged=%d captureMask=0x%x pose=%d content=%d layers=%u "
+                "swapchain=%ux%u actualFormat=%u eye=%ux%u format=%u "
+                "recommended=%ux%u maxEye=%ux%u blend=%d\n",
+                static_cast<unsigned long long>(g_xrFrames), static_cast<int>(g_sessionState),
+                frameState.shouldRender ? 1 : 0, static_cast<unsigned>(CurrentMode()),
+                g_stereoEngaged.load(std::memory_order_relaxed) ? 1 : 0, captureMask,
+                g_latestPose.valid ? 1 : 0, g_haveSubmittableContent ? 1 : 0, layerCount,
+                g_swapchainWidth, g_swapchainHeight, g_swapchainImageFormat,
+                g_lastEyeWidth, g_lastEyeHeight, g_lastEyeFormat,
+                g_recommendedWidth, g_recommendedHeight,
+                g_maxSwapchainWidth, g_maxSwapchainHeight, static_cast<int>(g_blendMode));
+            std::fflush(stderr);
         }
 
         bool LocateFrameViews(XrTime time, PosePacket& packet)
@@ -1367,11 +1567,29 @@ namespace VR
             static_cast<unsigned>(mode), captureMask, freshPair ? 1 : 0, bootstrap ? 1 : 0,
             frameState.shouldRender ? 1 : 0, freshPose.valid ? 1 : 0);
 
+        ++g_xrFrames;
+
+        // MARATHON_VR_TEST_PATTERN=1 bypasses the game entirely: it fills the
+        // swapchain with flat per-eye colours at the runtime's recommended eye
+        // size. Use it to decide whether a black headset is a submission
+        // problem or a capture problem.
+        if (frameState.shouldRender && TestPatternEnabled())
+        {
+            const uint32_t width = g_recommendedWidth != 0 ? g_recommendedWidth : 1024;
+            const uint32_t height = g_recommendedHeight != 0 ? g_recommendedHeight : 1024;
+            if (CreateColorSwapchain(width, height) && AcquireAndFillTestPattern())
+            {
+                g_haveSubmittableContent = true;
+                g_framesWithoutContent = 0;
+                g_contentWidth = width;
+                g_contentHeight = height;
+            }
+        }
         // Refresh the headset image only when this frame actually completed a
         // stereo pair. Every other frame reuses the last image that copied
         // successfully, so a missed capture reprojects the previous view
         // instead of dropping to an empty layer list.
-        if (frameState.shouldRender && freshPair &&
+        else if (frameState.shouldRender && freshPair &&
             leftEyeSource != nullptr && rightEyeSource != nullptr)
         {
             auto* leftD3D = static_cast<plume::D3D12Texture*>(leftEyeSource);
@@ -1382,6 +1600,9 @@ namespace VR
                 const D3D12_RESOURCE_DESC rightDesc = rightD3D->d3d->GetDesc();
                 const uint32_t eyeWidth = static_cast<uint32_t>(leftDesc.Width);
                 const uint32_t eyeHeight = leftDesc.Height;
+                g_lastEyeWidth = eyeWidth;
+                g_lastEyeHeight = eyeHeight;
+                g_lastEyeFormat = unsigned(leftDesc.Format);
                 if (rightDesc.Width != leftDesc.Width || rightDesc.Height != leftDesc.Height)
                 {
                     Warn("VR eye captures differ in size (%ux%u vs %llux%u)",
@@ -1498,6 +1719,10 @@ namespace VR
         endInfo.layers = layerCount != 0 ? layers.data() : nullptr;
         Trace("xrEndFrame layers=%u content=%d %ux%u",
             layerCount, g_haveSubmittableContent ? 1 : 0, g_contentWidth, g_contentHeight);
+        {
+            std::lock_guard lock(g_poseMutex);
+            ReportDiagnostics(captureMask, layerCount, frameState);
+        }
         if (CheckXr(xrEndFrame(g_session, &endInfo), "xrEndFrame") && layerCount != 0)
         {
             ++g_presentedFrames;
@@ -1558,6 +1783,11 @@ namespace VR
         {
             g_copyAllocator->Release();
             g_copyAllocator = nullptr;
+        }
+        if (g_testPatternRtvHeap != nullptr)
+        {
+            g_testPatternRtvHeap->Release();
+            g_testPatternRtvHeap = nullptr;
         }
         g_nativeDevice = nullptr;
         g_nativeQueue = nullptr;
