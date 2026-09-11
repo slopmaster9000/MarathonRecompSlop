@@ -93,3 +93,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionDefault.cmake")
 # runtime implementation without touching the generated capture hooks.
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVR.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRStereoV2.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRDLSSConfigCompat.cmake")
