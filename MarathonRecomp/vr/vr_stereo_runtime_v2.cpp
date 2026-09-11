@@ -110,7 +110,23 @@ namespace VR
 
         std::mutex g_statusMutex;
         std::array<char, 512> g_status = { "OpenXR not initialized" };
+        std::array<char, 512> g_lastWarning{};
         uint64_t g_presentedFrames = 0;
+
+        // Content retained from the last successful stereo copy. The OpenXR
+        // frame loop must keep running even when a frame produces no new eye
+        // capture, so such a frame resubmits this image instead of ending with
+        // an empty layer list. An empty layer list is what a headset shows as
+        // a solid black screen.
+        int64_t g_swapchainFormat = 0;
+        bool g_haveSubmittableContent = false;
+        uint32_t g_contentWidth = 0;
+        uint32_t g_contentHeight = 0;
+        std::array<XrView, 2> g_contentViews{};
+        bool g_haveContentViews = false;
+        std::atomic<bool> g_stereoEngaged = false;
+        uint32_t g_presentsSinceXrFrame = 0;
+        uint32_t g_framesWithoutContent = 0;
 
         EVRMode CurrentMode()
         {
@@ -124,7 +140,63 @@ namespace VR
             va_start(args, format);
             std::vsnprintf(g_status.data(), g_status.size(), format, args);
             va_end(args);
+            g_lastWarning[0] = 0;
             std::fprintf(stderr, "[SlopVR] %s\n", g_status.data());
+            std::fflush(stderr);
+        }
+
+        // Failure paths inside the frame loop repeat on every present. Report
+        // each distinct reason once so a broken submission is visible in the
+        // log (and in the F1 overlay) without flooding either.
+        void Warn(const char* format, ...)
+        {
+            std::array<char, 512> message{};
+            va_list args;
+            va_start(args, format);
+            std::vsnprintf(message.data(), message.size(), format, args);
+            va_end(args);
+
+            std::lock_guard lock(g_statusMutex);
+            if (std::strcmp(message.data(), g_lastWarning.data()) == 0)
+                return;
+            std::memcpy(g_lastWarning.data(), message.data(), message.size());
+            std::memcpy(g_status.data(), message.data(), message.size());
+            std::fprintf(stderr, "[SlopVR] %s\n", message.data());
+            std::fflush(stderr);
+        }
+
+        bool TraceEnabled()
+        {
+            static const bool enabled = []
+            {
+                const char* value = std::getenv("MARATHON_VR_TRACE");
+                return value != nullptr && value[0] != 0 && value[0] != '0';
+            }();
+            return enabled;
+        }
+
+        // Opt-in, bounded per-frame trace for hardware bring-up.
+        void Trace(const char* format, ...)
+        {
+            if (!TraceEnabled())
+                return;
+            static std::atomic<uint32_t> budget{ 600 };
+            uint32_t remaining = budget.load(std::memory_order_relaxed);
+            while (remaining != 0 &&
+                   !budget.compare_exchange_weak(remaining, remaining - 1,
+                       std::memory_order_relaxed, std::memory_order_relaxed))
+            {
+            }
+            if (remaining == 0)
+                return;
+
+            std::fprintf(stderr, "[SlopVR][trace] ");
+            va_list args;
+            va_start(args, format);
+            std::vfprintf(stderr, format, args);
+            va_end(args);
+            std::fprintf(stderr, "\n");
+            std::fflush(stderr);
         }
 
         bool EnvironmentFlagEnabled(const char* name, bool defaultValue)
@@ -164,11 +236,72 @@ namespace VR
             return std::max(0.001f, EnvironmentFloat("MARATHON_VR_WORLD_SCALE", 1.0f));
         }
 
+        // D3D12 copies require the two resources to share a typeless family,
+        // not an identical DXGI_FORMAT. OpenXR runtimes routinely back a
+        // swapchain requested as B8G8R8A8_UNORM with a shared, typeless
+        // resource (Virtual Desktop does exactly this), so comparing
+        // GetDesc().Format against the requested format rejects a perfectly
+        // valid destination.
+        DXGI_FORMAT TypelessFamily(DXGI_FORMAT format)
+        {
+            switch (format)
+            {
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8X8_UNORM:
+            case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+                return DXGI_FORMAT_B8G8R8X8_TYPELESS;
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            case DXGI_FORMAT_R8G8B8A8_UINT:
+            case DXGI_FORMAT_R8G8B8A8_SNORM:
+            case DXGI_FORMAT_R8G8B8A8_SINT:
+                return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            default:
+                return format;
+            }
+        }
+
+        bool CopyCompatible(DXGI_FORMAT a, DXGI_FORMAT b)
+        {
+            return TypelessFamily(a) == TypelessFamily(b);
+        }
+
+        // The eye captures are BACKBUFFER_FORMAT (B8G8R8A8_UNORM). Accept any
+        // spelling of that family the runtime offers, preferring the plain
+        // UNORM view so the headset matches the desktop mirror exactly.
+        int64_t SelectSwapchainFormat(const std::vector<int64_t>& formats)
+        {
+            const DXGI_FORMAT preference[] = {
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                DXGI_FORMAT_B8G8R8A8_TYPELESS,
+            };
+            for (const DXGI_FORMAT candidate : preference)
+            {
+                if (std::find(formats.begin(), formats.end(),
+                        static_cast<int64_t>(candidate)) != formats.end())
+                {
+                    return static_cast<int64_t>(candidate);
+                }
+            }
+            for (const int64_t offered : formats)
+            {
+                if (CopyCompatible(static_cast<DXGI_FORMAT>(offered), DXGI_FORMAT_B8G8R8A8_UNORM))
+                    return offered;
+            }
+            return 0;
+        }
+
         bool CheckXr(XrResult result, const char* action)
         {
             if (XR_SUCCEEDED(result))
                 return true;
-            SetStatus("%s failed (OpenXR result %d)", action, static_cast<int>(result));
+            Warn("%s failed (OpenXR result %d)", action, static_cast<int>(result));
             return false;
         }
 
@@ -676,7 +809,7 @@ namespace VR
             if ((g_maxSwapchainWidth != 0 && width > g_maxSwapchainWidth) ||
                 (g_maxSwapchainHeight != 0 && height > g_maxSwapchainHeight))
             {
-                SetStatus("VR eye image %ux%u exceeds OpenXR limit %ux%u",
+                Warn("VR eye image %ux%u exceeds the OpenXR limit %ux%u; lower the game resolution",
                     width, height, g_maxSwapchainWidth, g_maxSwapchainHeight);
                 return false;
             }
@@ -690,12 +823,24 @@ namespace VR
                     g_session, formatCount, &formatCount, formats.data()),
                     "xrEnumerateSwapchainFormats(data)"))
                 return false;
-            const int64_t desiredFormat = static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM);
-            if (std::find(formats.begin(), formats.end(), desiredFormat) == formats.end())
+            const int64_t desiredFormat = SelectSwapchainFormat(formats);
+            if (desiredFormat == 0)
             {
-                SetStatus("OpenXR runtime does not expose BGRA8 UNORM swapchains");
+                std::array<char, 256> offered{};
+                int written = 0;
+                for (const int64_t format : formats)
+                {
+                    const int room = static_cast<int>(offered.size()) - written;
+                    if (room <= 1)
+                        break;
+                    written += std::snprintf(offered.data() + written, size_t(room),
+                        written == 0 ? "%lld" : ",%lld", static_cast<long long>(format));
+                }
+                Warn("OpenXR runtime exposes no BGRA8-compatible swapchain format (offered: %s)",
+                    offered.data());
                 return false;
             }
+            g_swapchainFormat = desiredFormat;
 
             XrSwapchainCreateInfo createInfo{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
             createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
@@ -724,6 +869,8 @@ namespace VR
             g_swapchainWidth = width;
             g_swapchainHeight = height;
             g_swapchainArraySize = arraySize;
+            Trace("swapchain ready %ux%u array=%u images=%u format=%lld",
+                width, height, arraySize, imageCount, static_cast<long long>(desiredFormat));
             return true;
         }
 
@@ -733,6 +880,10 @@ namespace VR
             g_screenAnchored = false;
             g_eyeCaptureMask = 0;
             g_haveRenderedViews = false;
+            g_haveSubmittableContent = false;
+            g_haveContentViews = false;
+            g_presentsSinceXrFrame = 0;
+            g_framesWithoutContent = 0;
             g_modeChangePending = true;
             std::lock_guard lock(g_poseMutex);
             g_latestPose = {};
@@ -750,6 +901,7 @@ namespace VR
                 {
                     const auto& changed = *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
                     g_sessionState = changed.state;
+                    Trace("session state -> %d", static_cast<int>(g_sessionState));
                     if (g_sessionState == XR_SESSION_STATE_READY && !g_sessionRunning.load())
                     {
                         XrSessionBeginInfo beginInfo{ XR_TYPE_SESSION_BEGIN_INFO };
@@ -766,6 +918,8 @@ namespace VR
                         xrEndSession(g_session);
                         g_sessionRunning = false;
                         DestroyColorSwapchain();
+                        g_haveSubmittableContent = false;
+                        g_haveContentViews = false;
                         SetStatus("OpenXR session stopped; desktop game remains active");
                     }
                     else if (g_sessionState == XR_SESSION_STATE_EXITING ||
@@ -801,25 +955,42 @@ namespace VR
                 static_cast<plume::D3D12Texture*>(rightSource)->d3d,
             };
             if (dst == nullptr || sources[0] == nullptr || sources[1] == nullptr)
+            {
+                Warn("VR stereo copy is missing a source or destination resource");
                 return false;
+            }
 
             const D3D12_RESOURCE_DESC dstDesc = dst->GetDesc();
+            if (dstDesc.DepthOrArraySize < 2)
+            {
+                Warn("OpenXR swapchain image is not a 2-slice array (slices=%u)",
+                    unsigned(dstDesc.DepthOrArraySize));
+                return false;
+            }
             for (uint32_t eye = 0; eye < 2; eye++)
             {
                 const D3D12_RESOURCE_DESC srcDesc = sources[eye]->GetDesc();
-                if (srcDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
-                    srcDesc.Width != dstDesc.Width || srcDesc.Height != dstDesc.Height)
+                if (srcDesc.Width != dstDesc.Width || srcDesc.Height != dstDesc.Height)
                 {
-                    SetStatus("VR eye capture does not match OpenXR swapchain size/format");
+                    Warn("VR eye %u capture %llux%u does not match the OpenXR swapchain %llux%u",
+                        eye, static_cast<unsigned long long>(srcDesc.Width), srcDesc.Height,
+                        static_cast<unsigned long long>(dstDesc.Width), dstDesc.Height);
+                    return false;
+                }
+                if (!CopyCompatible(srcDesc.Format, dstDesc.Format))
+                {
+                    Warn("VR eye %u capture format %u cannot be copied into OpenXR swapchain format %u",
+                        eye, unsigned(srcDesc.Format), unsigned(dstDesc.Format));
                     return false;
                 }
             }
-            if (dstDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || dstDesc.DepthOrArraySize < 2)
-                return false;
 
             if (FAILED(g_copyAllocator->Reset()) ||
                 FAILED(g_copyCommandList->Reset(g_copyAllocator, nullptr)))
+            {
+                Warn("failed to reset the VR stereo copy command list");
                 return false;
+            }
 
             D3D12_RESOURCE_BARRIER destinationBarrier{};
             destinationBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -846,14 +1017,17 @@ namespace VR
             std::swap(destinationBarrier.Transition.StateBefore, destinationBarrier.Transition.StateAfter);
             g_copyCommandList->ResourceBarrier(1, &destinationBarrier);
             if (FAILED(g_copyCommandList->Close()))
+            {
+                Warn("failed to close the VR stereo copy command list");
                 return false;
+            }
 
             ID3D12CommandList* lists[] = { g_copyCommandList };
             g_nativeQueue->ExecuteCommandLists(1, lists);
             const uint64_t fenceValue = ++g_copyFenceValue;
             if (FAILED(g_nativeQueue->Signal(g_copyFence, fenceValue)) || !WaitForCopyFence(fenceValue))
             {
-                SetStatus("failed waiting for VR stereo copy completion");
+                Warn("failed waiting for VR stereo copy completion");
                 return false;
             }
             return true;
@@ -894,24 +1068,40 @@ namespace VR
             locateInfo.displayTime = time;
             locateInfo.space = g_localSpace;
             uint32_t viewCount = 0;
-            if (XR_FAILED(xrLocateViews(
-                    g_session, &locateInfo, &viewState,
-                    static_cast<uint32_t>(packet.views.size()), &viewCount, packet.views.data())) ||
-                viewCount != packet.views.size())
+            const XrResult locateViews = xrLocateViews(
+                g_session, &locateInfo, &viewState,
+                static_cast<uint32_t>(packet.views.size()), &viewCount, packet.views.data());
+            if (XR_FAILED(locateViews) || viewCount != packet.views.size())
+            {
+                Warn("xrLocateViews failed (result %d, %u views)",
+                    static_cast<int>(locateViews), viewCount);
                 return false;
+            }
 
             const XrViewStateFlags requiredViewFlags =
                 XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
             if ((viewState.viewStateFlags & requiredViewFlags) != requiredViewFlags)
+            {
+                Trace("view pose not yet valid (flags 0x%llx)",
+                    static_cast<unsigned long long>(viewState.viewStateFlags));
                 return false;
+            }
 
             XrSpaceLocation headLocation{ XR_TYPE_SPACE_LOCATION };
-            if (XR_FAILED(xrLocateSpace(g_viewSpace, g_localSpace, time, &headLocation)))
+            const XrResult locateHead = xrLocateSpace(g_viewSpace, g_localSpace, time, &headLocation);
+            if (XR_FAILED(locateHead))
+            {
+                Warn("xrLocateSpace(view) failed (result %d)", static_cast<int>(locateHead));
                 return false;
+            }
             const XrSpaceLocationFlags requiredHeadFlags =
                 XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
             if ((headLocation.locationFlags & requiredHeadFlags) != requiredHeadFlags)
+            {
+                Trace("head pose not yet valid (flags 0x%llx)",
+                    static_cast<unsigned long long>(headLocation.locationFlags));
                 return false;
+            }
 
             packet.head = headLocation.pose;
             packet.head.orientation = NormalizeQuaternion(packet.head.orientation);
@@ -931,9 +1121,12 @@ namespace VR
             if (!changed)
                 return false;
 
-            DestroyColorSwapchain();
+            // Keep the swapchain. Recreating it costs several frames during
+            // which nothing can be submitted, and the headset shows black for
+            // exactly that long. Only the anchoring is mode dependent.
             g_screenAnchored = false;
             g_presentedFrames = 0;
+            g_haveContentViews = false;
             g_eyeCaptureMask = 0;
             g_lastSubmittedMode = mode;
             if (freshPose.valid)
@@ -1006,12 +1199,19 @@ namespace VR
         if (previous != requestedRaw)
         {
             g_modeChangePending = true;
+            g_stereoEngaged.store(false, std::memory_order_relaxed);
             return false;
         }
         if (g_modeChangePending.load() || !g_initialized || !g_sessionRunning.load())
+        {
+            g_stereoEngaged.store(false, std::memory_order_relaxed);
             return false;
+        }
 
         std::lock_guard lock(g_poseMutex);
+        // SubmitFrame uses this to know whether a guest frame produces one
+        // Present (monoscopic) or two (one per eye).
+        g_stereoEngaged.store(g_latestPose.valid, std::memory_order_relaxed);
         return g_latestPose.valid;
     }
 
@@ -1025,8 +1225,11 @@ namespace VR
             std::lock_guard lock(g_poseMutex);
             if (eye == 0)
             {
+                // Do not clear g_eyeCaptureMask here. The render thread owns
+                // that mask; clearing it from the guest thread can land between
+                // the two render-thread captures and destroy the pair that
+                // SubmitFrame is waiting for.
                 g_activeRenderPose = g_latestPose;
-                g_eyeCaptureMask = 0;
             }
             pose = g_activeRenderPose;
         }
@@ -1039,7 +1242,7 @@ namespace VR
         CameraLayout layout{};
         if (!ResolveCameraLayout(*camera, layout))
         {
-            SetStatus("VR stereo could not resolve Sonic 06 camera matrices");
+            Warn("VR stereo could not resolve Sonic 06 camera matrices");
             return false;
         }
 
@@ -1097,7 +1300,10 @@ namespace VR
     void MarkEyeCaptured(uint32_t eye)
     {
         if (eye < 2)
-            g_eyeCaptureMask.fetch_or(1u << eye, std::memory_order_release);
+        {
+            const uint32_t previous = g_eyeCaptureMask.fetch_or(1u << eye, std::memory_order_release);
+            Trace("eye captured eye=%u mask 0x%x -> 0x%x", eye, previous, previous | (1u << eye));
+        }
     }
 
     void SubmitFrame(
@@ -1117,6 +1323,32 @@ namespace VR
         if (!g_sessionRunning.load())
             return;
 
+        bool havePublishedPose = false;
+        {
+            std::lock_guard lock(g_poseMutex);
+            havePublishedPose = g_latestPose.valid;
+        }
+
+        const uint32_t captureMask = g_eyeCaptureMask.load(std::memory_order_acquire);
+        const bool freshPair = captureMask == 3u;
+        const bool bootstrap =
+            g_modeChangePending.load(std::memory_order_relaxed) || !havePublishedPose;
+
+        // A stereo guest frame presents once per eye, so prefer to spend one
+        // OpenXR frame on the completed pair rather than one per eye. That
+        // preference must never become a dependency: if the pair does not
+        // arrive, the watchdog runs the frame anyway. An OpenXR frame loop that
+        // stops calling xrWaitFrame/xrEndFrame is precisely what leaves the
+        // headset on a solid black screen while the desktop keeps rendering.
+        ++g_presentsSinceXrFrame;
+        if (!freshPair && !bootstrap &&
+            g_stereoEngaged.load(std::memory_order_relaxed) &&
+            g_presentsSinceXrFrame < 2)
+        {
+            return;
+        }
+        g_presentsSinceXrFrame = 0;
+
         XrFrameWaitInfo frameWait{ XR_TYPE_FRAME_WAIT_INFO };
         XrFrameState frameState{ XR_TYPE_FRAME_STATE };
         if (!CheckXr(xrWaitFrame(g_session, &frameWait, &frameState), "xrWaitFrame"))
@@ -1128,20 +1360,19 @@ namespace VR
         PosePacket freshPose{};
         LocateFrameViews(frameState.predictedDisplayTime, freshPose);
         const EVRMode mode = CurrentMode();
-        const bool recentered = ResetModePresentation(mode, freshPose);
+        ResetModePresentation(mode, freshPose);
         PublishPose(freshPose);
 
-        std::array<const XrCompositionLayerBaseHeader*, 2> layers{};
-        uint32_t layerCount = 0;
-        std::array<XrCompositionLayerQuad, 2> quadLayers{};
-        std::array<XrCompositionLayerProjectionView, 2> projectionViews{};
-        XrCompositionLayerProjection projectionLayer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+        Trace("frame mode=%u mask=0x%x fresh=%d boot=%d shouldRender=%d pose=%d",
+            static_cast<unsigned>(mode), captureMask, freshPair ? 1 : 0, bootstrap ? 1 : 0,
+            frameState.shouldRender ? 1 : 0, freshPose.valid ? 1 : 0);
 
-        const bool haveStereoCaptures =
-            leftEyeSource != nullptr && rightEyeSource != nullptr &&
-            g_eyeCaptureMask.load(std::memory_order_acquire) == 3u;
-
-        if (!recentered && frameState.shouldRender && haveStereoCaptures)
+        // Refresh the headset image only when this frame actually completed a
+        // stereo pair. Every other frame reuses the last image that copied
+        // successfully, so a missed capture reprojects the previous view
+        // instead of dropping to an empty layer list.
+        if (frameState.shouldRender && freshPair &&
+            leftEyeSource != nullptr && rightEyeSource != nullptr)
         {
             auto* leftD3D = static_cast<plume::D3D12Texture*>(leftEyeSource);
             auto* rightD3D = static_cast<plume::D3D12Texture*>(rightEyeSource);
@@ -1151,75 +1382,122 @@ namespace VR
                 const D3D12_RESOURCE_DESC rightDesc = rightD3D->d3d->GetDesc();
                 const uint32_t eyeWidth = static_cast<uint32_t>(leftDesc.Width);
                 const uint32_t eyeHeight = leftDesc.Height;
-                if (rightDesc.Width == leftDesc.Width && rightDesc.Height == leftDesc.Height &&
-                    CreateColorSwapchain(eyeWidth, eyeHeight) &&
-                    AcquireAndCopyStereo(leftEyeSource, rightEyeSource))
+                if (rightDesc.Width != leftDesc.Width || rightDesc.Height != leftDesc.Height)
                 {
-                    if (mode == EVRMode::VirtualScreen && freshPose.valid)
-                    {
-                        AnchorVirtualScreen(freshPose);
-                        const float widthMeters = ScreenWidth();
-                        const float heightMeters = widthMeters /
-                            std::max(0.25f, g_screenAspect.load(std::memory_order_relaxed));
-                        for (uint32_t eye = 0; eye < 2; eye++)
-                        {
-                            quadLayers[eye] = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-                            quadLayers[eye].space = g_localSpace;
-                            quadLayers[eye].eyeVisibility = eye == 0
-                                ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
-                            quadLayers[eye].subImage.swapchain = g_colorSwapchain;
-                            quadLayers[eye].subImage.imageRect.offset = { 0, 0 };
-                            quadLayers[eye].subImage.imageRect.extent = {
-                                static_cast<int32_t>(eyeWidth), static_cast<int32_t>(eyeHeight) };
-                            quadLayers[eye].subImage.imageArrayIndex = eye;
-                            quadLayers[eye].pose = g_screenPose;
-                            quadLayers[eye].size = { widthMeters, heightMeters };
-                            layers[eye] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayers[eye]);
-                        }
-                        layerCount = 2;
-                    }
-                    else if (mode == EVRMode::Immersive360)
-                    {
-                        std::array<XrView, 2> submittedViews{};
-                        bool haveViews = false;
-                        {
-                            std::lock_guard lock(g_poseMutex);
-                            if (g_haveRenderedViews)
-                            {
-                                submittedViews = g_renderedViews;
-                                haveViews = true;
-                            }
-                        }
-                        if (haveViews)
-                        {
-                            for (uint32_t eye = 0; eye < 2; eye++)
-                            {
-                                projectionViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
-                                projectionViews[eye].pose = submittedViews[eye].pose;
-                                projectionViews[eye].fov = submittedViews[eye].fov;
-                                projectionViews[eye].subImage.swapchain = g_colorSwapchain;
-                                projectionViews[eye].subImage.imageRect.offset = { 0, 0 };
-                                projectionViews[eye].subImage.imageRect.extent = {
-                                    static_cast<int32_t>(eyeWidth), static_cast<int32_t>(eyeHeight) };
-                                projectionViews[eye].subImage.imageArrayIndex = eye;
-                            }
-                            projectionLayer.space = g_localSpace;
-                            projectionLayer.viewCount = static_cast<uint32_t>(projectionViews.size());
-                            projectionLayer.views = projectionViews.data();
-                            layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
-                            layerCount = 1;
-                        }
-                    }
+                    Warn("VR eye captures differ in size (%ux%u vs %llux%u)",
+                        eyeWidth, eyeHeight,
+                        static_cast<unsigned long long>(rightDesc.Width), rightDesc.Height);
+                }
+                else if (CreateColorSwapchain(eyeWidth, eyeHeight) &&
+                         AcquireAndCopyStereo(leftEyeSource, rightEyeSource))
+                {
+                    g_haveSubmittableContent = true;
+                    g_framesWithoutContent = 0;
+                    g_contentWidth = eyeWidth;
+                    g_contentHeight = eyeHeight;
+
+                    std::lock_guard lock(g_poseMutex);
+                    g_contentViews = g_renderedViews;
+                    g_haveContentViews = g_haveRenderedViews;
                 }
             }
         }
 
-        g_eyeCaptureMask = 0;
+        // Nothing has ever reached the headset: say so instead of leaving the
+        // user staring at a black screen with a clean log.
+        if (!g_haveSubmittableContent && ++g_framesWithoutContent == 600)
+        {
+            Warn("no VR eye capture has reached OpenXR after 600 frames "
+                 "(stereo engaged=%d, capture mask=0x%x); the headset stays black",
+                g_stereoEngaged.load(std::memory_order_relaxed) ? 1 : 0, captureMask);
+        }
+
+        std::array<const XrCompositionLayerBaseHeader*, 2> layers{};
+        uint32_t layerCount = 0;
+        std::array<XrCompositionLayerQuad, 2> quadLayers{};
+        std::array<XrCompositionLayerProjectionView, 2> projectionViews{};
+        XrCompositionLayerProjection projectionLayer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+
+        if (frameState.shouldRender && g_haveSubmittableContent &&
+            g_colorSwapchain != XR_NULL_HANDLE)
+        {
+            XrRect2Di imageRect{};
+            imageRect.offset = { 0, 0 };
+            imageRect.extent = {
+                static_cast<int32_t>(g_contentWidth), static_cast<int32_t>(g_contentHeight) };
+
+            if (mode == EVRMode::VirtualScreen)
+            {
+                AnchorVirtualScreen(freshPose);
+                const float widthMeters = ScreenWidth();
+                const float heightMeters = widthMeters /
+                    std::max(0.25f, g_screenAspect.load(std::memory_order_relaxed));
+                for (uint32_t eye = 0; eye < 2; eye++)
+                {
+                    quadLayers[eye] = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+                    quadLayers[eye].space = g_localSpace;
+                    quadLayers[eye].eyeVisibility = eye == 0
+                        ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+                    quadLayers[eye].subImage.swapchain = g_colorSwapchain;
+                    quadLayers[eye].subImage.imageRect = imageRect;
+                    quadLayers[eye].subImage.imageArrayIndex = eye;
+                    quadLayers[eye].pose = g_screenPose;
+                    quadLayers[eye].size = { widthMeters, heightMeters };
+                    layers[eye] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayers[eye]);
+                }
+                layerCount = 2;
+            }
+            else
+            {
+                // Prefer the views the eyes were actually rendered with. Before
+                // the first stereo pair (and for the monoscopic menu capture)
+                // fall back to this frame's located views so the projection
+                // layer is still well formed and the image stays visible.
+                std::array<XrView, 2> submittedViews{};
+                bool haveViews = false;
+                {
+                    std::lock_guard lock(g_poseMutex);
+                    if (g_haveContentViews)
+                    {
+                        submittedViews = g_contentViews;
+                        haveViews = true;
+                    }
+                    else if (g_latestPose.valid)
+                    {
+                        submittedViews = g_latestPose.views;
+                        haveViews = true;
+                    }
+                }
+                if (haveViews)
+                {
+                    for (uint32_t eye = 0; eye < 2; eye++)
+                    {
+                        projectionViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
+                        projectionViews[eye].pose = submittedViews[eye].pose;
+                        projectionViews[eye].fov = submittedViews[eye].fov;
+                        projectionViews[eye].subImage.swapchain = g_colorSwapchain;
+                        projectionViews[eye].subImage.imageRect = imageRect;
+                        projectionViews[eye].subImage.imageArrayIndex = eye;
+                    }
+                    projectionLayer.space = g_localSpace;
+                    projectionLayer.viewCount = static_cast<uint32_t>(projectionViews.size());
+                    projectionLayer.views = projectionViews.data();
+                    layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+                    layerCount = 1;
+                }
+            }
+        }
+
+        if (freshPair)
+            g_eyeCaptureMask.store(0, std::memory_order_release);
+
         XrFrameEndInfo endInfo{ XR_TYPE_FRAME_END_INFO };
         endInfo.displayTime = frameState.predictedDisplayTime;
         endInfo.environmentBlendMode = g_blendMode;
         endInfo.layerCount = layerCount;
         endInfo.layers = layerCount != 0 ? layers.data() : nullptr;
+        Trace("xrEndFrame layers=%u content=%d %ux%u",
+            layerCount, g_haveSubmittableContent ? 1 : 0, g_contentWidth, g_contentHeight);
         if (CheckXr(xrEndFrame(g_session, &endInfo), "xrEndFrame") && layerCount != 0)
         {
             ++g_presentedFrames;
@@ -1285,6 +1563,12 @@ namespace VR
         g_nativeQueue = nullptr;
         g_sessionRunning = false;
         g_initialized = false;
+        g_haveSubmittableContent = false;
+        g_haveContentViews = false;
+        g_contentWidth = 0;
+        g_contentHeight = 0;
+        g_presentsSinceXrFrame = 0;
+        g_stereoEngaged.store(false, std::memory_order_relaxed);
         SetStatus("OpenXR shut down");
     }
 

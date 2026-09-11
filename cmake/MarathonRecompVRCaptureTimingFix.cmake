@@ -108,69 +108,23 @@ _mr_vr_timing_replace(_mr_vr_timing_video "capturing the armed eye at Present"
 file(WRITE "${_MR_VR_GENERATED_VIDEO}" "${_mr_vr_timing_video}")
 
 # -----------------------------------------------------------------------------
-# Stable stereo frames must not advance OpenXR once per guest-eye Present.
-# Retain the first eye capture and run the OpenXR frame lifecycle only when the
-# second eye completes the pair. Bootstrap/recenter frames are still allowed to
-# run without captures so session events and the first tracking pose progress.
+# The OpenXR frame loop itself now lives in vr_stereo_runtime_v2.cpp, including
+# the "wait for the second guest eye, but never stall" logic that used to be
+# patched in here. Only copy the runtime into the generated tree so downstream
+# layers keep a single well-known path to it.
 # -----------------------------------------------------------------------------
 set(_MR_VR_V2_RUNTIME "${CMAKE_SOURCE_DIR}/MarathonRecomp/vr/vr_stereo_runtime_v2.cpp")
 set(_MR_VR_TIMING_RUNTIME_DIR "${_MR_VR_GENERATED_DIR}/vr")
 set(_MR_VR_TIMING_RUNTIME "${_MR_VR_TIMING_RUNTIME_DIR}/vr_stereo_runtime_v3.cpp")
 file(MAKE_DIRECTORY "${_MR_VR_TIMING_RUNTIME_DIR}")
-file(READ "${_MR_VR_V2_RUNTIME}" _mr_vr_timing_runtime)
-
-set(_MR_VR_SUBMIT_LIFECYCLE_OLD [=[        (void)desktopSource;
-        if (!g_initialized)
-            return;
-        if (desktopWidth != 0 && desktopHeight != 0)
-            g_screenAspect.store(float(desktopWidth) / float(desktopHeight), std::memory_order_relaxed);
-
-        PollEvents();
-        if (!g_sessionRunning.load())
-            return;
-
-        XrFrameWaitInfo frameWait{ XR_TYPE_FRAME_WAIT_INFO };]=])
-set(_MR_VR_SUBMIT_LIFECYCLE_NEW [=[        (void)desktopSource;
-        if (!g_initialized)
-            return;
-        if (desktopWidth != 0 && desktopHeight != 0)
-            g_screenAspect.store(float(desktopWidth) / float(desktopHeight), std::memory_order_relaxed);
-
-        PollEvents();
-        if (!g_sessionRunning.load())
-            return;
-
-        bool havePublishedPose = false;
-        {
-            std::lock_guard lock(g_poseMutex);
-            havePublishedPose = g_latestPose.valid;
-        }
-
-        const uint32_t captureMask = g_eyeCaptureMask.load(std::memory_order_acquire);
-        const bool needsTrackingLifecycle =
-            g_modeChangePending.load(std::memory_order_relaxed) || !havePublishedPose;
-
-        // Each Sonic guest eye calls Present independently. Keep the first eye
-        // alive across that Present and do not consume an OpenXR frame until the
-        // second eye has also been captured. Bootstrap/recenter frames are the
-        // exception because they must publish a tracking pose before stereo can
-        // start at all.
-        if (captureMask != 3u && !needsTrackingLifecycle)
-            return;
-
-        XrFrameWaitInfo frameWait{ XR_TYPE_FRAME_WAIT_INFO };]=])
-_mr_vr_timing_replace(_mr_vr_timing_runtime "gating the OpenXR frame lifecycle on a complete stereo pair"
-    "${_MR_VR_SUBMIT_LIFECYCLE_OLD}"
-    "${_MR_VR_SUBMIT_LIFECYCLE_NEW}")
-
-file(WRITE "${_MR_VR_TIMING_RUNTIME}" "${_mr_vr_timing_runtime}")
+configure_file("${_MR_VR_V2_RUNTIME}" "${_MR_VR_TIMING_RUNTIME}" COPYONLY)
 
 # VRStereoV2 added the source v2 runtime directly. Replace it with the generated
-# v3 timing-fixed copy while leaving the tiny compatibility shim in place.
+# copy while leaving the tiny compatibility shim in place.
 set_source_files_properties(
     "${_MR_VR_V2_RUNTIME}"
     TARGET_DIRECTORY MarathonRecomp
     PROPERTIES HEADER_FILE_ONLY TRUE)
 target_sources(MarathonRecomp PRIVATE "${_MR_VR_TIMING_RUNTIME}")
 
-message(STATUS "SlopVR: capture timing v3 enabled (paired Present capture + UI fallback + center desktop mirror)")
+message(STATUS "SlopVR: capture timing v3 enabled (paired Present capture + UI fallback)")
