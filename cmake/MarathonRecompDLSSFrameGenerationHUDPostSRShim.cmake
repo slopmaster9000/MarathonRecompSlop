@@ -2,7 +2,8 @@
 #
 # The late HUD layer originally matched the exact RHS of FrameResources::inputColor.
 # Earlier DLSS diagnostics/object-motion layers are intentionally allowed to rewrite
-# the evaluator, so anchor on the single inputColor assignment itself instead.
+# the evaluator, so patch only the inputColor assignment inside the gameplay
+# DLSSEvaluateRenderedFrame() function instead of scanning the whole runtime.
 
 if(NOT MARATHON_RECOMP_DLSS OR NOT MARATHON_RECOMP_DLSS_FRAME_GENERATION)
     return()
@@ -26,24 +27,68 @@ _mr_dlss_fg_postsr_replace(
 ]=])
 
 set(_MR_DLSS_FG_POSTSR_NEW_INPUT_PATCH [=[
+# Other generated helpers may contain FrameResources/inputColor assignments too.
+# Restrict the rewrite to the gameplay temporal evaluator so a menu/diagnostic
+# FrameResources setup can never be mistaken for the DLSS-SR source frame.
+set(_MR_DLSS_FG_POSTSR_EVAL_BEGIN
+    "static bool DLSSEvaluateRenderedFrame()")
+set(_MR_DLSS_FG_POSTSR_EVAL_END
+    "static uint32_t DLSSGammaSourceDescriptor()")
+
+string(FIND
+    "${_mr_dlss_fg_postsr_base_runtime}"
+    "${_MR_DLSS_FG_POSTSR_EVAL_BEGIN}"
+    _mr_dlss_fg_postsr_eval_begin)
+string(FIND
+    "${_mr_dlss_fg_postsr_base_runtime}"
+    "${_MR_DLSS_FG_POSTSR_EVAL_END}"
+    _mr_dlss_fg_postsr_eval_end)
+if(_mr_dlss_fg_postsr_eval_begin EQUAL -1 OR
+   _mr_dlss_fg_postsr_eval_end EQUAL -1 OR
+   _mr_dlss_fg_postsr_eval_end LESS_EQUAL _mr_dlss_fg_postsr_eval_begin)
+    message(FATAL_ERROR
+        "DLSS FG post-SR HUD layer could not isolate DLSSEvaluateRenderedFrame().")
+endif()
+
+math(EXPR _mr_dlss_fg_postsr_eval_length
+    "${_mr_dlss_fg_postsr_eval_end} - ${_mr_dlss_fg_postsr_eval_begin}")
+string(SUBSTRING
+    "${_mr_dlss_fg_postsr_base_runtime}"
+    0
+    ${_mr_dlss_fg_postsr_eval_begin}
+    _mr_dlss_fg_postsr_eval_prefix)
+string(SUBSTRING
+    "${_mr_dlss_fg_postsr_base_runtime}"
+    ${_mr_dlss_fg_postsr_eval_begin}
+    ${_mr_dlss_fg_postsr_eval_length}
+    _mr_dlss_fg_postsr_eval_body)
+string(SUBSTRING
+    "${_mr_dlss_fg_postsr_base_runtime}"
+    ${_mr_dlss_fg_postsr_eval_end}
+    -1
+    _mr_dlss_fg_postsr_eval_suffix)
+
 set(_MR_DLSS_FG_POSTSR_INPUT_ASSIGNMENT_REGEX
     "resources\\.inputColor[ \t\r\n]*=[^;]*;")
 string(REGEX MATCHALL
     "${_MR_DLSS_FG_POSTSR_INPUT_ASSIGNMENT_REGEX}"
     _mr_dlss_fg_postsr_input_assignments
-    "${_mr_dlss_fg_postsr_base_runtime}")
+    "${_mr_dlss_fg_postsr_eval_body}")
 list(LENGTH
     _mr_dlss_fg_postsr_input_assignments
     _mr_dlss_fg_postsr_input_assignment_count)
 if(NOT _mr_dlss_fg_postsr_input_assignment_count EQUAL 1)
     message(FATAL_ERROR
-        "DLSS FG post-SR HUD layer expected exactly one FrameResources inputColor assignment; found ${_mr_dlss_fg_postsr_input_assignment_count}.")
+        "DLSS FG post-SR HUD layer expected exactly one inputColor assignment inside DLSSEvaluateRenderedFrame(); found ${_mr_dlss_fg_postsr_input_assignment_count}.")
 endif()
+
 string(REGEX REPLACE
     "${_MR_DLSS_FG_POSTSR_INPUT_ASSIGNMENT_REGEX}"
     "resources.inputColor = DLSSFGTemporalInputColor();"
-    _mr_dlss_fg_postsr_base_runtime
-    "${_mr_dlss_fg_postsr_base_runtime}")
+    _mr_dlss_fg_postsr_eval_body
+    "${_mr_dlss_fg_postsr_eval_body}")
+set(_mr_dlss_fg_postsr_base_runtime
+    "${_mr_dlss_fg_postsr_eval_prefix}${_mr_dlss_fg_postsr_eval_body}${_mr_dlss_fg_postsr_eval_suffix}")
 ]=])
 
 string(FIND
@@ -73,5 +118,5 @@ file(WRITE
     "${_mr_dlss_fg_postsr_script}")
 
 message(STATUS
-    "DLSS Frame Generation: using robust post-SR inputColor assignment anchor")
+    "DLSS Frame Generation: using evaluator-scoped post-SR inputColor anchor")
 include("${_MR_DLSS_FG_POSTSR_GENERATED_SCRIPT}")
