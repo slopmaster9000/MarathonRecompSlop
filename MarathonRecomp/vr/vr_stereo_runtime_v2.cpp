@@ -74,6 +74,7 @@ namespace VR
         bool g_haveOrigin = false;
         bool g_screenAnchored = false;
         EVRMode g_lastSubmittedMode = EVRMode::VirtualScreen;
+        bool g_reportedStereo = false;
         XrSessionState g_sessionState = XR_SESSION_STATE_UNKNOWN;
         XrEnvironmentBlendMode g_blendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 
@@ -146,6 +147,11 @@ namespace VR
         uint32_t g_desktopWidth = 0;
         uint32_t g_desktopHeight = 0;
         uint64_t g_xrFrames = 0;
+        // Guest presents. Compared against renderHook this says whether the
+        // guest render function the stereo path re-enters actually runs once
+        // per frame: Video::Present is hooked to sub_825586B0, while the stereo
+        // path wraps sub_82744840, and nothing guarantees they pair up.
+        uint64_t g_presentCalls = 0;
         uint32_t g_diagFrames = 0;
         std::atomic<uint64_t> g_renderHookCalls{ 0 };
         std::atomic<uint64_t> g_renderHookStereo{ 0 };
@@ -156,6 +162,9 @@ namespace VR
         std::atomic<uint32_t> g_cameraSearchFound{ 0 };
         std::atomic<uint32_t> g_cameraCandidates{ 0 };
         std::atomic<uint32_t> g_cameraLayoutFailures{ 0 };
+        std::atomic<uint32_t> g_cameraNoGame{ 0 };
+        std::atomic<uint32_t> g_cameraLists{ 0 };
+        std::atomic<float> g_cameraBestError{ -1.0f };
 
         ID3D12DescriptorHeap* g_testPatternRtvHeap = nullptr;
         uint32_t g_rtvDescriptorSize = 0;
@@ -643,48 +652,6 @@ namespace VR
             return ProjectionForTangents(baseProjection, left, right, down, up);
         }
 
-        Sonicteam::SoX::Scenery::CameraImp* FindGameplayCamera()
-        {
-            g_cameraSearchTotal.fetch_add(1, std::memory_order_relaxed);
-            if (App::s_pApp == nullptr || App::s_pApp->m_pDoc.get() == nullptr)
-                return nullptr;
-            auto* game = App::s_pApp->GetGame();
-            if (game == nullptr || game->m_vvspCameras.empty())
-                return nullptr;
-            g_cameraCandidates.store(
-                static_cast<uint32_t>(game->m_vvspCameras[0].size()), std::memory_order_relaxed);
-
-            Sonicteam::SoX::Scenery::CameraImp* bestCamera = nullptr;
-            float bestScore = 1.0e9f;
-            for (auto& spCamera : game->m_vvspCameras[0])
-            {
-                auto* camera = static_cast<Sonicteam::SoX::Scenery::CameraImp*>(spCamera.get());
-                if (camera == nullptr)
-                    continue;
-                const float fov = camera->m_FOV;
-                const float aspectWidth = camera->m_AspectRatioWidth;
-                const float aspectHeight = camera->m_AspectRatioHeight;
-                const float nearPlane = camera->m_Near;
-                const float farPlane = camera->m_Far;
-                if (!IsFinite(fov) || !IsFinite(aspectWidth) || !IsFinite(aspectHeight) ||
-                    !IsFinite(nearPlane) || !IsFinite(farPlane) ||
-                    fov <= 0.05f || fov >= 3.10f || aspectWidth <= 0.0f || aspectHeight <= 0.0f ||
-                    nearPlane <= 0.0f || farPlane <= nearPlane || !IsFinite(CopyMatrix(camera->m_ViewMatrix)))
-                {
-                    continue;
-                }
-                const float score = std::fabs((aspectWidth / aspectHeight) - (16.0f / 9.0f));
-                if (score < bestScore)
-                {
-                    bestScore = score;
-                    bestCamera = camera;
-                }
-            }
-            if (bestCamera != nullptr)
-                g_cameraSearchFound.fetch_add(1, std::memory_order_relaxed);
-            return bestCamera;
-        }
-
         bool ResolveCameraLayout(const Sonicteam::SoX::Scenery::CameraImp& camera, CameraLayout& result)
         {
             const Matrix view = CopyMatrix(camera.m_ViewMatrix);
@@ -729,6 +696,92 @@ namespace VR
                 result.rowProjection = Transpose(best->projection);
             }
             return true;
+        }
+
+        // Structural validation beats plausibility guessing: a camera whose
+        // view * projection reproduces its own view-projection matrix is the
+        // camera the game is rendering with, whatever its FOV or aspect happen
+        // to be. The old filter rejected on FOV range, aspect and near/far
+        // before ever looking at the matrices, so a camera that was perfectly
+        // usable could be discarded for having an unexpected field of view.
+        Sonicteam::SoX::Scenery::CameraImp* FindGameplayCamera(CameraLayout& layout)
+        {
+            g_cameraSearchTotal.fetch_add(1, std::memory_order_relaxed);
+            if (App::s_pApp == nullptr || App::s_pApp->m_pDoc.get() == nullptr)
+            {
+                g_cameraNoGame.fetch_add(1, std::memory_order_relaxed);
+                return nullptr;
+            }
+            auto* game = App::s_pApp->GetGame();
+            if (game == nullptr || game->m_vvspCameras.empty())
+            {
+                // GetGame() only returns a game while the document is in game
+                // mode, so this is the ordinary answer in menus and on loading
+                // screens rather than a failure.
+                g_cameraNoGame.fetch_add(1, std::memory_order_relaxed);
+                return nullptr;
+            }
+
+            g_cameraLists.store(
+                static_cast<uint32_t>(game->m_vvspCameras.size()), std::memory_order_relaxed);
+
+            Sonicteam::SoX::Scenery::CameraImp* bestCamera = nullptr;
+            CameraLayout bestLayout{};
+            float bestAspectScore = 1.0e9f;
+            uint32_t candidates = 0;
+            uint32_t layoutFailures = 0;
+
+            // Search every camera list. Sonic 06 does not guarantee the camera
+            // being rendered lives in list 0.
+            for (auto& cameraList : game->m_vvspCameras)
+            {
+                for (auto& spCamera : cameraList)
+                {
+                    auto* camera = static_cast<Sonicteam::SoX::Scenery::CameraImp*>(spCamera.get());
+                    if (camera == nullptr)
+                        continue;
+                    ++candidates;
+
+                    CameraLayout candidateLayout{};
+                    if (!ResolveCameraLayout(*camera, candidateLayout))
+                    {
+                        ++layoutFailures;
+                        continue;
+                    }
+
+                    const float aspectWidth = camera->m_AspectRatioWidth;
+                    const float aspectHeight = camera->m_AspectRatioHeight;
+                    const float aspectScore =
+                        (IsFinite(aspectWidth) && IsFinite(aspectHeight) &&
+                         aspectWidth > 0.0f && aspectHeight > 0.0f)
+                            ? std::fabs((aspectWidth / aspectHeight) - (16.0f / 9.0f))
+                            : 1.0e3f;
+
+                    // Prefer a clearly better matrix fit; otherwise prefer the
+                    // camera whose aspect ratio matches the output.
+                    const bool better = bestCamera == nullptr ||
+                        candidateLayout.error < bestLayout.error * 0.5f ||
+                        (candidateLayout.error < bestLayout.error * 2.0f && aspectScore < bestAspectScore);
+                    if (better)
+                    {
+                        bestCamera = camera;
+                        bestLayout = candidateLayout;
+                        bestAspectScore = aspectScore;
+                    }
+                }
+            }
+
+            g_cameraCandidates.store(candidates, std::memory_order_relaxed);
+            if (bestCamera == nullptr)
+            {
+                g_cameraLayoutFailures.fetch_add(layoutFailures != 0 ? 1u : 0u, std::memory_order_relaxed);
+                return nullptr;
+            }
+
+            g_cameraBestError.store(bestLayout.error, std::memory_order_relaxed);
+            g_cameraSearchFound.fetch_add(1, std::memory_order_relaxed);
+            layout = bestLayout;
+            return bestCamera;
         }
 
         bool OpenXRExtensionAvailable(const char* extensionName)
@@ -1302,12 +1355,14 @@ namespace VR
                 return;
 
             std::fprintf(stderr,
-                "[SlopVR][diag] xrFrames=%llu sessionState=%d shouldRender=%d mode=%u "
+                "[SlopVR][diag] presents=%llu xrFrames=%llu sessionState=%d shouldRender=%d mode=%u "
                 "stereoEngaged=%d captureMask=0x%x pose=%d content=%d layers=%u "
                 "swapchain=%ux%u actualFormat=%u eye=%ux%u format=%u desktop=%ux%u "
                 "recommended=%ux%u maxEye=%ux%u blend=%d staleFrames=%u "
                 "renderHook=%llu stereoBranch=%llu captureRequests=%llu captureSkips=%llu "
-                "cameraSearches=%u cameraFound=%u cameraCount=%u cameraLayoutFails=%u\n",
+                "cameraSearches=%u cameraFound=%u cameraCount=%u cameraLayoutFails=%u "
+                "cameraNoGame=%u cameraLists=%u cameraError=%.4f\n",
+                static_cast<unsigned long long>(g_presentCalls),
                 static_cast<unsigned long long>(g_xrFrames), static_cast<int>(g_sessionState),
                 frameState.shouldRender ? 1 : 0, static_cast<unsigned>(CurrentMode()),
                 g_stereoEngaged.load(std::memory_order_relaxed) ? 1 : 0, captureMask,
@@ -1325,7 +1380,10 @@ namespace VR
                 g_cameraSearchTotal.load(std::memory_order_relaxed),
                 g_cameraSearchFound.load(std::memory_order_relaxed),
                 g_cameraCandidates.load(std::memory_order_relaxed),
-                g_cameraLayoutFailures.load(std::memory_order_relaxed));
+                g_cameraLayoutFailures.load(std::memory_order_relaxed),
+                g_cameraNoGame.load(std::memory_order_relaxed),
+                g_cameraLists.load(std::memory_order_relaxed),
+                double(g_cameraBestError.load(std::memory_order_relaxed)));
             std::fflush(stderr);
         }
 
@@ -1510,16 +1568,10 @@ namespace VR
         if (!pose.valid)
             return false;
 
-        auto* camera = FindGameplayCamera();
+        CameraLayout layout{};
+        auto* camera = FindGameplayCamera(layout);
         if (camera == nullptr)
             return false;
-        CameraLayout layout{};
-        if (!ResolveCameraLayout(*camera, layout))
-        {
-            g_cameraLayoutFailures.fetch_add(1, std::memory_order_relaxed);
-            Warn("VR stereo could not resolve Sonic 06 camera matrices");
-            return false;
-        }
 
         g_savedCamera.camera = camera;
         g_savedCamera.view = CopyMatrix(camera->m_ViewMatrix);
@@ -1621,6 +1673,7 @@ namespace VR
             g_desktopHeight = desktopHeight;
         }
 
+        ++g_presentCalls;
         PollEvents();
         if (!g_sessionRunning.load())
             return;
@@ -1727,6 +1780,7 @@ namespace VR
                     std::lock_guard lock(g_poseMutex);
                     g_contentViews = g_renderedViews;
                     g_haveContentViews = g_haveRenderedViews;
+                    g_haveRenderedViews = false;
                 }
             }
         }
@@ -1764,7 +1818,8 @@ namespace VR
             imageRect.extent = {
                 static_cast<int32_t>(g_contentWidth), static_cast<int32_t>(g_contentHeight) };
 
-            if (mode == EVRMode::VirtualScreen)
+            const bool stereoContent = mode == EVRMode::Immersive360 && g_haveContentViews;
+            if (!stereoContent)
             {
                 AnchorVirtualScreen(freshPose);
                 // Size the portal from the image actually being shown, not
@@ -1792,42 +1847,25 @@ namespace VR
             }
             else
             {
-                // Prefer the views the eyes were actually rendered with. Before
-                // the first stereo pair (and for the monoscopic menu capture)
-                // fall back to this frame's located views so the projection
-                // layer is still well formed and the image stays visible.
                 std::array<XrView, 2> submittedViews{};
-                bool haveViews = false;
                 {
                     std::lock_guard lock(g_poseMutex);
-                    if (g_haveContentViews)
-                    {
-                        submittedViews = g_contentViews;
-                        haveViews = true;
-                    }
-                    else if (g_latestPose.valid)
-                    {
-                        submittedViews = g_latestPose.views;
-                        haveViews = true;
-                    }
+                    submittedViews = g_contentViews;
                 }
-                if (haveViews)
+                for (uint32_t eye = 0; eye < 2; eye++)
                 {
-                    for (uint32_t eye = 0; eye < 2; eye++)
-                    {
-                        projectionViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
-                        projectionViews[eye].pose = submittedViews[eye].pose;
-                        projectionViews[eye].fov = submittedViews[eye].fov;
-                        projectionViews[eye].subImage.swapchain = g_colorSwapchain;
-                        projectionViews[eye].subImage.imageRect = imageRect;
-                        projectionViews[eye].subImage.imageArrayIndex = eye;
-                    }
-                    projectionLayer.space = g_localSpace;
-                    projectionLayer.viewCount = static_cast<uint32_t>(projectionViews.size());
-                    projectionLayer.views = projectionViews.data();
-                    layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
-                    layerCount = 1;
+                    projectionViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
+                    projectionViews[eye].pose = submittedViews[eye].pose;
+                    projectionViews[eye].fov = submittedViews[eye].fov;
+                    projectionViews[eye].subImage.swapchain = g_colorSwapchain;
+                    projectionViews[eye].subImage.imageRect = imageRect;
+                    projectionViews[eye].subImage.imageArrayIndex = eye;
                 }
+                projectionLayer.space = g_localSpace;
+                projectionLayer.viewCount = static_cast<uint32_t>(projectionViews.size());
+                projectionLayer.views = projectionViews.data();
+                layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+                layerCount = 1;
             }
         }
 
@@ -1848,15 +1886,22 @@ namespace VR
         if (CheckXr(xrEndFrame(g_session, &endInfo), "xrEndFrame") && layerCount != 0)
         {
             ++g_presentedFrames;
-            if (g_presentedFrames == 1)
+            const bool stereoNow = mode == EVRMode::Immersive360 && g_haveContentViews;
+            if (g_presentedFrames == 1 || stereoNow != g_reportedStereo)
             {
-                if (mode == EVRMode::VirtualScreen)
+                g_reportedStereo = stereoNow;
+                if (stereoNow)
                 {
-                    SetStatus("OpenXR active: stereo head-coupled Virtual Screen portal; rotation stays on gamepad camera");
+                    SetStatus("OpenXR active: Immersive 360 true stereo; full per-eye 6DoF head tracking");
+                }
+                else if (mode == EVRMode::Immersive360)
+                {
+                    SetStatus("OpenXR active: Immersive 360 waiting on the gameplay camera; "
+                              "showing a monoscopic world-locked screen");
                 }
                 else
                 {
-                    SetStatus("OpenXR active: Immersive 360 true stereo; full per-eye 6DoF head tracking");
+                    SetStatus("OpenXR active: Virtual Screen portal; rotation stays on gamepad camera");
                 }
             }
         }

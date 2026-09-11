@@ -7,10 +7,17 @@
 - Uses standard OpenXR with the existing MarathonRecomp D3D12 device and direct command queue.
 - Works with an active PC OpenXR runtime such as Virtual Desktop's VDXR runtime.
 - Keeps normal Sonic 06 gamepad/controller input unchanged. Quest motion controllers are not mapped to gameplay.
-- Two true-stereo modes, selected in **Options -> Video -> VR Mode**:
+- Two modes, selected in **Options -> Video -> VR Mode** or with `MARATHON_VR_MODE`:
   - **Virtual Screen** applies only eye/head translation and an off-axis portal projection through a fixed plane, and submits the result as two eye-specific quad layers. Camera rotation stays on the gamepad.
   - **Immersive 360** applies the full per-eye pose and OpenXR per-eye FOV, and submits a two-slice stereo projection layer.
-- The scene is rendered once per eye. Logos, loading screens and menus have no gameplay camera, so they are rendered once and copied to both eyes (monoscopic, but visible).
+- A projection layer is only submitted when the image really was rendered through the OpenXR eye poses. Anything else — menus, loading screens, or gameplay where the camera could not be resolved — is presented as a world-locked quad instead, because stretching a game-camera render across the headset FOV is worse than showing an honest screen you can look around. The F1 `VR` row says which is running.
+
+### Stereo prerequisites
+
+True stereo needs the guest scene to be rendered twice per frame, once per eye, which needs two things the runtime does not control:
+
+1. **The guest render function must be re-enterable once per frame.** The stereo path wraps `sub_82744840`; `Video::Present` is hooked to a different guest function (`sub_825586B0`). Nothing guarantees the two pair up, and a captured session showed the stereo branch arming only twice across ~1500 frames. The diagnostic line reports `presents` against `renderHook` so this is measurable rather than assumed.
+2. **A gameplay `CameraImp` must be resolvable.** `AppMarathon::GetGame()` only returns a game while the document is in game mode, so menus and loading screens legitimately have none. Cameras are matched structurally — a camera whose view × projection reproduces its own view-projection matrix is the one the game is rendering with — across every camera list, rather than by guessing at plausible FOV and aspect ratios.
 - The desktop window keeps presenting normally, so the game stays playable if the headset session ends.
 - If anything on the submission path fails, the reason is printed to stderr once and shown in the F1 GPU profiler `VR` row instead of leaving the headset silently black.
 
