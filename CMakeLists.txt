@@ -90,9 +90,11 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSObjectMotionDefault.cmake")
 
 # VR is deliberately last: it layers on top of either the vanilla renderer or
 # the final DLSS-generated renderer sources. Later VR modules resolve runtime,
-# config-composition, Present/capture timing, and safe early-boot behavior.
+# config-composition, Present/capture timing, safe early-boot behavior, and a
+# bounded hardware trace for OpenXR submission debugging.
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVR.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRStereoV2.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRDLSSConfigCompat.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRCaptureTimingFix.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRBootSafety.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompVRSubmissionTrace.cmake")
