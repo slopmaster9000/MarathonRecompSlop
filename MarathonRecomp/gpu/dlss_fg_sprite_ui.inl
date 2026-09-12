@@ -85,14 +85,24 @@ static void DLSSFGRegisterSpriteUITexture(
     GuestTexture* texture,
     bool isSpriteUI)
 {
-    if (texture != nullptr && isSpriteUI)
-        g_dlssFGSpriteUITextures.insert(texture);
+    if (texture == nullptr || !isSpriteUI)
+        return;
+
+    g_dlssFGSpriteUITextures.insert(texture);
+    // SetTexture() can substitute the controller-icon diff-patched texture before
+    // it reaches the render thread. Preserve the same UI identity for that object.
+    if (texture->patchedTexture != nullptr)
+        g_dlssFGSpriteUITextures.insert(texture->patchedTexture.get());
 }
 
 static void DLSSFGUnregisterSpriteUITexture(GuestTexture* texture)
 {
-    if (texture != nullptr)
-        g_dlssFGSpriteUITextures.erase(texture);
+    if (texture == nullptr)
+        return;
+
+    if (texture->patchedTexture != nullptr)
+        g_dlssFGSpriteUITextures.erase(texture->patchedTexture.get());
+    g_dlssFGSpriteUITextures.erase(texture);
 }
 
 static void DLSSFGSpriteUIBeginFrame()
