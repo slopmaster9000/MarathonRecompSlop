@@ -95,3 +95,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDCompileFi
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDPostSRShimV3.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDSpriteAssets.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDComposeFix.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDPersistentBindings.cmake")
