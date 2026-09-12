@@ -12,7 +12,7 @@ endif()
 option(MARATHON_RECOMP_DLSS_NEURAL_RENDERING
     "Enable the experimental DLSS 5 Neural Rendering bootstrap" ON)
 set(MARATHON_RECOMP_DLSS_NR_RUNTIME "" CACHE FILEPATH
-    "Path to nvngx_dlssnr.dll. If empty, CMake also checks the source root and private asset directory.")
+    "Path to nvngx_dlssnr.dll. If empty, CMake also checks the source root, private asset directory, and Streamline SDK runtime directory.")
 
 if(NOT MARATHON_RECOMP_DLSS_NEURAL_RENDERING)
     return()
@@ -160,9 +160,9 @@ target_sources(MarathonRecomp PRIVATE
     "${CMAKE_SOURCE_DIR}/MarathonRecomp/gpu/dlss_neural_rendering.cpp")
 
 # -----------------------------------------------------------------------------
-# Runtime packaging. The 159 MiB user-supplied DLL is deliberately not encoded
-# into source control; local builds can point directly at it, while CI can place
-# it in the private asset checkout as private/nvngx_dlssnr.dll.
+# Runtime packaging. Prefer an explicitly supplied/user-private NR runtime, but
+# also accept the matching NGX binary from Streamline 2.14+ when the SDK ships
+# it. This keeps CI artifacts usable without forcing the large DLL into git.
 # -----------------------------------------------------------------------------
 set(_MR_DLSS_NR_RUNTIME_FILE "")
 if(NOT MARATHON_RECOMP_DLSS_NR_RUNTIME STREQUAL "")
@@ -175,6 +175,8 @@ elseif(EXISTS "${CMAKE_SOURCE_DIR}/nvngx_dlssnr.dll")
     set(_MR_DLSS_NR_RUNTIME_FILE "${CMAKE_SOURCE_DIR}/nvngx_dlssnr.dll")
 elseif(EXISTS "${CMAKE_SOURCE_DIR}/private/nvngx_dlssnr.dll")
     set(_MR_DLSS_NR_RUNTIME_FILE "${CMAKE_SOURCE_DIR}/private/nvngx_dlssnr.dll")
+elseif(DEFINED _MR_DLSS_BIN AND EXISTS "${_MR_DLSS_BIN}/nvngx_dlssnr.dll")
+    set(_MR_DLSS_NR_RUNTIME_FILE "${_MR_DLSS_BIN}/nvngx_dlssnr.dll")
 endif()
 
 if(NOT _MR_DLSS_NR_RUNTIME_FILE STREQUAL "")
