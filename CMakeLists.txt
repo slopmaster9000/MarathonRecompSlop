@@ -98,3 +98,4 @@ include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDComposeFi
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDPersistentBindings.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDCSD.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSFrameGenerationHUDCSDCompileFix.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/MarathonRecompDLSSNeuralRendering.cmake")
