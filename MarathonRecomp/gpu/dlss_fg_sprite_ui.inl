@@ -18,9 +18,11 @@
 #include <unordered_set>
 
 static std::unordered_set<const GuestTexture*> g_dlssFGSpriteUITextures;
+static std::unordered_set<uint32_t> g_dlssFGSpriteUIDescriptors;
 static std::mutex g_dlssFGSpriteUITextureMutex;
 static uint32_t g_dlssFGSpriteUIDrawCount;
 static uint32_t g_dlssFGSpriteUIBoundDrawCount;
+static uint32_t g_dlssFGSpriteUIDescriptorMatchCount;
 static uint32_t g_dlssFGSpriteUIPersistentCandidateCount;
 static uint32_t g_dlssFGSpriteUIPositionTCount;
 static uint32_t g_dlssFGSpriteUICaptureAttemptCount;
@@ -95,10 +97,16 @@ static void DLSSFGRegisterSpriteUITexture(
 
     std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
     g_dlssFGSpriteUITextures.insert(texture);
+    g_dlssFGSpriteUIDescriptors.insert(texture->descriptorIndex);
+
     // SetTexture() can substitute the controller-icon diff-patched texture before
-    // it reaches the render thread. Preserve the same UI identity for that object.
+    // it reaches the render thread. Preserve the same UI identity for that object
+    // and its actual shader-visible descriptor.
     if (texture->patchedTexture != nullptr)
+    {
         g_dlssFGSpriteUITextures.insert(texture->patchedTexture.get());
+        g_dlssFGSpriteUIDescriptors.insert(texture->patchedTexture->descriptorIndex);
+    }
 }
 
 static void DLSSFGUnregisterSpriteUITexture(GuestTexture* texture)
@@ -108,7 +116,12 @@ static void DLSSFGUnregisterSpriteUITexture(GuestTexture* texture)
 
     std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
     if (texture->patchedTexture != nullptr)
+    {
+        g_dlssFGSpriteUIDescriptors.erase(texture->patchedTexture->descriptorIndex);
         g_dlssFGSpriteUITextures.erase(texture->patchedTexture.get());
+    }
+
+    g_dlssFGSpriteUIDescriptors.erase(texture->descriptorIndex);
     g_dlssFGSpriteUITextures.erase(texture);
 }
 
@@ -118,10 +131,17 @@ static size_t DLSSFGSpriteUITextureCount()
     return g_dlssFGSpriteUITextures.size();
 }
 
+static size_t DLSSFGSpriteUIDescriptorCount()
+{
+    std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
+    return g_dlssFGSpriteUIDescriptors.size();
+}
+
 static void DLSSFGSpriteUIBeginFrame()
 {
     g_dlssFGSpriteUIDrawCount = 0;
     g_dlssFGSpriteUIBoundDrawCount = 0;
+    g_dlssFGSpriteUIDescriptorMatchCount = 0;
     g_dlssFGSpriteUIPersistentCandidateCount = 0;
     g_dlssFGSpriteUIPositionTCount = 0;
     g_dlssFGSpriteUICaptureAttemptCount = 0;
@@ -141,6 +161,25 @@ static bool DLSSFGFindBoundSpriteUITexture(uint32_t& slot)
             slot = i;
             return true;
         }
+
+        // Wrapper identity is not guaranteed to survive every translated guest
+        // path. Match the shader-visible descriptor as well. This catches aliases
+        // or replacement GuestTexture wrappers that reference the same GPU image.
+        if (texture != nullptr &&
+            g_dlssFGSpriteUIDescriptors.contains(texture->descriptorIndex))
+        {
+            g_dlssFGSpriteUIDescriptorMatchCount++;
+            slot = i;
+            return true;
+        }
+
+        const uint32_t boundDescriptor = g_sharedConstants.texture2DIndices[i];
+        if (g_dlssFGSpriteUIDescriptors.contains(boundDescriptor))
+        {
+            g_dlssFGSpriteUIDescriptorMatchCount++;
+            slot = i;
+            return true;
+        }
     }
 
     slot = UINT32_MAX;
@@ -153,8 +192,11 @@ static void DLSSFGNoteTextureBinding(const GuestTexture* texture)
         return;
 
     std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
-    if (g_dlssFGSpriteUITextures.contains(texture))
+    if (g_dlssFGSpriteUITextures.contains(texture) ||
+        g_dlssFGSpriteUIDescriptors.contains(texture->descriptorIndex))
+    {
         g_dlssFGSpriteUIBindingPending = true;
+    }
 }
 
 static bool DLSSFGConsumeSpriteUIBinding(uint32_t& slot)
@@ -198,11 +240,10 @@ static bool DLSSFGPersistentSpriteUIDraw(uint32_t& slot)
     if (positionT)
         g_dlssFGSpriteUIPositionTCount++;
 
-    // Build 324 proved the game's sprite textures can stay bound across frames,
-    // so a fresh SetTexture cannot be required. Asset identity is still mandatory;
-    // additionally require unmistakably 2D draw state before accepting a stale
-    // binding. POSITIONT is the strongest signal. z-disabled alpha sprites are
-    // also accepted because some Sonic 06 UI paths use ordinary POSITION data.
+    // Asset identity is mandatory; additionally require unmistakably 2D draw
+    // state before accepting a persistent binding. POSITIONT is the strongest
+    // signal. z-disabled alpha sprites are also accepted because some Sonic 06
+    // UI paths use ordinary POSITION data.
     const bool screenSpaceLike = positionT || !g_pipelineState.zEnable;
     const bool hudLike =
         screenSpaceLike &&
