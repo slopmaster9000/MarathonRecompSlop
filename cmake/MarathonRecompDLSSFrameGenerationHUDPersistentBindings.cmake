@@ -87,11 +87,13 @@ set(_MR_DLSS_FG_PERSIST_STATUS_OLD [=[
         g_dlssFGSpriteUICaptureAttemptCount,
 ]=])
 set(_MR_DLSS_FG_PERSIST_STATUS_NEW [=[
-        "candidates=%u spriteTex=%zu spriteDraw=%u bound=%u posT=%u persist=%u spriteCap=%u/%u slot=%u captured=%s preSR=%s compose=%s ui=%s",
+        "candidates=%u spriteTex=%zu gpuIds=%zu spriteDraw=%u bound=%u descHit=%u posT=%u persist=%u spriteCap=%u/%u slot=%u captured=%s preSR=%s compose=%s ui=%s",
         g_dlssFGHudBoundaryCandidateCount,
         DLSSFGSpriteUITextureCount(),
+        DLSSFGSpriteUIDescriptorCount(),
         g_dlssFGSpriteUIDrawCount,
         g_dlssFGSpriteUIBoundDrawCount,
+        g_dlssFGSpriteUIDescriptorMatchCount,
         g_dlssFGSpriteUIPositionTCount,
         g_dlssFGSpriteUIPersistentCandidateCount,
         g_dlssFGSpriteUICaptureSuccessCount,
