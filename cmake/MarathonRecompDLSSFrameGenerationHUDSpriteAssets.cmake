@@ -177,7 +177,7 @@ set(_MR_DLSS_FG_SPRITE_STATUS_NEW [=[
         sizeof(status),
         "candidates=%u spriteTex=%zu spriteDraw=%u spriteCap=%u/%u slot=%u captured=%s preSR=%s compose=%s ui=%s",
         g_dlssFGHudBoundaryCandidateCount,
-        g_dlssFGSpriteUITextures.size(),
+        DLSSFGSpriteUITextureCount(),
         g_dlssFGSpriteUIDrawCount,
         g_dlssFGSpriteUICaptureSuccessCount,
         g_dlssFGSpriteUICaptureAttemptCount,
