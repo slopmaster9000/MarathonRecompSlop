@@ -8,6 +8,7 @@
 #if defined(MARATHON_RECOMP_DLSS) && defined(MARATHON_RECOMP_D3D12) && defined(_WIN32)
 #include <Windows.h>
 #include <plume_d3d12.h>
+#include <sl.h>
 #endif
 
 namespace DLSSNR
@@ -52,9 +53,33 @@ namespace DLSSNR
         }
 
         auto* d3d12Device = static_cast<plume::D3D12Device*>(device);
-        if (d3d12Device->d3d == nullptr)
+        if (d3d12Device->d3d == nullptr || d3d12Device->adapter == nullptr)
         {
-            SetStatus("runtime bootstrap rejected: missing native D3D12 device");
+            SetStatus("runtime bootstrap rejected: missing native D3D12 device/adapter");
+            return false;
+        }
+
+        DXGI_ADAPTER_DESC1 adapterDesc{};
+        if (FAILED(d3d12Device->adapter->GetDesc1(&adapterDesc)))
+        {
+            SetStatus("runtime bootstrap rejected: DXGI adapter query failed");
+            return false;
+        }
+
+        sl::AdapterInfo adapterInfo{};
+        adapterInfo.deviceLUID = reinterpret_cast<uint8_t*>(&adapterDesc.AdapterLuid);
+        adapterInfo.deviceLUIDSizeInBytes = sizeof(adapterDesc.AdapterLuid);
+
+        if (slIsFeatureSupported(sl::kFeatureDLSS_NR, adapterInfo) != sl::Result::eOk)
+        {
+            SetStatus("Unavailable (Streamline DLSS-NR unsupported)");
+            return false;
+        }
+
+        bool nrPluginLoaded = false;
+        if (slIsFeatureLoaded(sl::kFeatureDLSS_NR, nrPluginLoaded) != sl::Result::eOk || !nrPluginLoaded)
+        {
+            SetStatus("Unavailable (sl.dlss_nr plugin not loaded)");
             return false;
         }
 
@@ -72,10 +97,9 @@ namespace DLSSNR
             return false;
         }
 
-        // Feature 18 is exposed by the supplied signed NGX snippet. Validate the
-        // D3D12 lifecycle surface now; parameter allocation and evaluation are
-        // wired by the next renderer stage rather than pretending a loaded DLL
-        // means Neural Rendering is already active.
+        // Validate the feature-18 NGX surface supplied to the Streamline NR
+        // plugin. Evaluation remains fail-closed until the output-resolution
+        // color preparation and guidance tags are wired end-to-end.
         static constexpr const char* kRequiredExports[] =
         {
             "NVSDK_NGX_D3D12_Init_Ext",
@@ -97,7 +121,7 @@ namespace DLSSNR
         }
 
         g_runtimeReady = true;
-        SetStatus("Runtime ready; Feature-18 evaluation bridge pending");
+        SetStatus("Streamline/NGX ready; NR evaluate bridge pending");
         return true;
 #else
         (void)device;
