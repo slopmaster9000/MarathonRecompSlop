@@ -20,6 +20,9 @@
 static std::unordered_set<const GuestTexture*> g_dlssFGSpriteUITextures;
 static std::mutex g_dlssFGSpriteUITextureMutex;
 static uint32_t g_dlssFGSpriteUIDrawCount;
+static uint32_t g_dlssFGSpriteUIBoundDrawCount;
+static uint32_t g_dlssFGSpriteUIPersistentCandidateCount;
+static uint32_t g_dlssFGSpriteUIPositionTCount;
 static uint32_t g_dlssFGSpriteUICaptureAttemptCount;
 static uint32_t g_dlssFGSpriteUICaptureSuccessCount;
 static uint32_t g_dlssFGSpriteUIFirstSlot = UINT32_MAX;
@@ -118,6 +121,9 @@ static size_t DLSSFGSpriteUITextureCount()
 static void DLSSFGSpriteUIBeginFrame()
 {
     g_dlssFGSpriteUIDrawCount = 0;
+    g_dlssFGSpriteUIBoundDrawCount = 0;
+    g_dlssFGSpriteUIPersistentCandidateCount = 0;
+    g_dlssFGSpriteUIPositionTCount = 0;
     g_dlssFGSpriteUICaptureAttemptCount = 0;
     g_dlssFGSpriteUICaptureSuccessCount = 0;
     g_dlssFGSpriteUIFirstSlot = UINT32_MAX;
@@ -164,4 +170,47 @@ static bool DLSSFGConsumeSpriteUIBinding(uint32_t& slot)
     // Ignore stale slot contents: a texture must both have been explicitly bound
     // since the preceding draw and still be present when this draw executes.
     return DLSSFGFindBoundSpriteUITexture(slot);
+}
+
+static bool DLSSFGSpriteUIUsesPositionT()
+{
+    const GuestVertexDeclaration* declaration = g_pipelineState.vertexDeclaration;
+    if (declaration == nullptr || declaration->vertexElements == nullptr)
+        return false;
+
+    for (uint32_t i = 0; i < declaration->vertexElementCount; ++i)
+    {
+        if (declaration->vertexElements[i].usage == D3DDECLUSAGE_POSITIONT)
+            return true;
+    }
+
+    return false;
+}
+
+static bool DLSSFGPersistentSpriteUIDraw(uint32_t& slot)
+{
+    if (!DLSSFGFindBoundSpriteUITexture(slot))
+        return false;
+
+    g_dlssFGSpriteUIBoundDrawCount++;
+
+    const bool positionT = DLSSFGSpriteUIUsesPositionT();
+    if (positionT)
+        g_dlssFGSpriteUIPositionTCount++;
+
+    // Build 324 proved the game's sprite textures can stay bound across frames,
+    // so a fresh SetTexture cannot be required. Asset identity is still mandatory;
+    // additionally require unmistakably 2D draw state before accepting a stale
+    // binding. POSITIONT is the strongest signal. z-disabled alpha sprites are
+    // also accepted because some Sonic 06 UI paths use ordinary POSITION data.
+    const bool screenSpaceLike = positionT || !g_pipelineState.zEnable;
+    const bool hudLike =
+        screenSpaceLike &&
+        !g_pipelineState.zWriteEnable &&
+        g_pipelineState.alphaBlendEnable;
+
+    if (hudLike)
+        g_dlssFGSpriteUIPersistentCandidateCount++;
+
+    return hudLike;
 }
