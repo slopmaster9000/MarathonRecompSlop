@@ -14,9 +14,11 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <mutex>
 #include <unordered_set>
 
 static std::unordered_set<const GuestTexture*> g_dlssFGSpriteUITextures;
+static std::mutex g_dlssFGSpriteUITextureMutex;
 static uint32_t g_dlssFGSpriteUIDrawCount;
 static uint32_t g_dlssFGSpriteUICaptureAttemptCount;
 static uint32_t g_dlssFGSpriteUICaptureSuccessCount;
@@ -88,6 +90,7 @@ static void DLSSFGRegisterSpriteUITexture(
     if (texture == nullptr || !isSpriteUI)
         return;
 
+    std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
     g_dlssFGSpriteUITextures.insert(texture);
     // SetTexture() can substitute the controller-icon diff-patched texture before
     // it reaches the render thread. Preserve the same UI identity for that object.
@@ -100,9 +103,16 @@ static void DLSSFGUnregisterSpriteUITexture(GuestTexture* texture)
     if (texture == nullptr)
         return;
 
+    std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
     if (texture->patchedTexture != nullptr)
         g_dlssFGSpriteUITextures.erase(texture->patchedTexture.get());
     g_dlssFGSpriteUITextures.erase(texture);
+}
+
+static size_t DLSSFGSpriteUITextureCount()
+{
+    std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
+    return g_dlssFGSpriteUITextures.size();
 }
 
 static void DLSSFGSpriteUIBeginFrame()
@@ -116,6 +126,7 @@ static void DLSSFGSpriteUIBeginFrame()
 
 static bool DLSSFGFindBoundSpriteUITexture(uint32_t& slot)
 {
+    std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
     for (uint32_t i = 0; i < 16; ++i)
     {
         const GuestTexture* texture = g_textures[i];
@@ -132,7 +143,11 @@ static bool DLSSFGFindBoundSpriteUITexture(uint32_t& slot)
 
 static void DLSSFGNoteTextureBinding(const GuestTexture* texture)
 {
-    if (texture != nullptr && g_dlssFGSpriteUITextures.contains(texture))
+    if (texture == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> lock(g_dlssFGSpriteUITextureMutex);
+    if (g_dlssFGSpriteUITextures.contains(texture))
         g_dlssFGSpriteUIBindingPending = true;
 }
 
