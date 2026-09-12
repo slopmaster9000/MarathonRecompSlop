@@ -5,6 +5,7 @@ on:
     branches:
       - dlss-poc
       - dlss-fg-poc
+      - DLSS-NR
   pull_request:
     types: [opened, synchronize]
   workflow_dispatch:
