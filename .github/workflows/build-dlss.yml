@@ -146,6 +146,14 @@ jobs:
           "STREAMLINE_SDK_ROOT=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Streamline SDK root: $sdkRoot"
 
+          $nrPlugin = Get-ChildItem -Path $sdkRoot -Recurse -File -Filter "sl.dlss_nr.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($nrPlugin) {
+            Write-Host "Streamline DLSS NR plugin found: $($nrPlugin.FullName)"
+          }
+          else {
+            Write-Warning "Streamline $env:STREAMLINE_VERSION exposes kFeatureDLSS_NR but this public SDK archive does not contain sl.dlss_nr.dll. NR will remain unavailable unless a compatible plugin/runtime is supplied separately."
+          }
+
       - name: Configure DLSS build
         shell: pwsh
         run: |
@@ -182,8 +190,7 @@ jobs:
             "nvngx_dlss.dll",
             "sl.dlss_g.dll",
             "nvngx_dlssg.dll",
-            "sl.reflex.dll",
-            "sl.dlss_nr.dll"
+            "sl.reflex.dll"
           )
 
           foreach ($file in $required) {
@@ -191,6 +198,16 @@ jobs:
             if (-not (Test-Path $path)) {
               Write-Error "DLSS build completed but required Streamline runtime file is missing: $file"
               exit 1
+            }
+          }
+
+          foreach ($file in @("sl.dlss_nr.dll", "nvngx_dlssnr.dll")) {
+            $path = Join-Path $buildOut $file
+            if (Test-Path $path) {
+              Write-Host "Optional DLSS Neural Rendering runtime present: $file"
+            }
+            else {
+              Write-Warning "Optional DLSS Neural Rendering runtime absent: $file"
             }
           }
 
