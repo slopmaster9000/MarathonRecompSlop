@@ -5,9 +5,9 @@
 # much stronger signal: the normal gameplay/town HUD and related UI are rendered
 # from a small, identifiable family of DDS textures.  Mark those textures when
 # MakePictureData creates their GuestTexture wrappers, then capture the 3D scene
-# immediately before the first draw that binds one.  The draw may target an
-# offscreen UI surface; the logical backbuffer can still be snapshotted at that
-# point before the later UI composite reaches it.
+# immediately before the first draw that explicitly binds one.  The draw may
+# target an offscreen UI surface; the logical backbuffer can still be snapshotted
+# at that point before the later UI composite reaches it.
 
 if(NOT MARATHON_RECOMP_DLSS OR NOT MARATHON_RECOMP_DLSS_FRAME_GENERATION)
     return()
@@ -108,12 +108,13 @@ static void DLSSFGConsiderHUDStart()
         return;
     }
 
-    // Strong path: sprite.arc identified this as an actual Sonic 06 gameplay
-    // HUD/UI draw. Capture the logical scene immediately, even when the guest is
-    // currently drawing the sprites into an offscreen UI surface. The later UI
-    // composite has not reached the intermediary backbuffer yet.
+    // Strong path: sprite.arc identified a texture explicitly bound since the
+    // preceding draw as Sonic 06 UI. Requiring a fresh SetTexture event avoids
+    // treating an old HUD texture left in an unused sampler slot as a new HUD
+    // draw. Capture the logical scene even when the current sprite target is an
+    // offscreen UI surface; its later composite has not reached the scene yet.
     uint32_t spriteSlot = UINT32_MAX;
-    if (DLSSFGFindBoundSpriteUITexture(spriteSlot))
+    if (DLSSFGConsumeSpriteUIBinding(spriteSlot))
     {
         g_dlssFGSpriteUIDrawCount++;
         if (g_dlssFGSpriteUIFirstSlot == UINT32_MAX)
@@ -196,8 +197,8 @@ file(WRITE "${_MR_DLSS_FG_SPRITE_RUNTIME}" "${_mr_dlss_fg_sprite_runtime}")
 
 # -----------------------------------------------------------------------------
 # Generated video: classify each picture texture from its source name/raw DDS
-# before DiffPatchTexture can modify the payload, then attach that identity to the
-# allocated GuestTexture wrapper. Remove stale pointers when textures are freed.
+# before DiffPatchTexture can modify the payload, attach that identity to the
+# allocated GuestTexture wrapper, and observe explicit guest texture bindings.
 # -----------------------------------------------------------------------------
 file(READ "${_MR_DLSS_GENERATED_VIDEO}" _mr_dlss_fg_sprite_video)
 
@@ -225,6 +226,23 @@ _mr_dlss_fg_sprite_replace(
     "picture-texture UI registration"
     "${_MR_DLSS_FG_SPRITE_LOAD_OLD}"
     "${_MR_DLSS_FG_SPRITE_LOAD_NEW}")
+
+set(_MR_DLSS_FG_SPRITE_BIND_OLD [=[
+static void ProcSetTexture(const RenderCommand& cmd)
+{
+    const auto& args = cmd.setTexture;
+]=])
+set(_MR_DLSS_FG_SPRITE_BIND_NEW [=[
+static void ProcSetTexture(const RenderCommand& cmd)
+{
+    const auto& args = cmd.setTexture;
+    DLSSFGNoteTextureBinding(args.texture);
+]=])
+_mr_dlss_fg_sprite_replace(
+    _mr_dlss_fg_sprite_video
+    "explicit HUD texture binding tracking"
+    "${_MR_DLSS_FG_SPRITE_BIND_OLD}"
+    "${_MR_DLSS_FG_SPRITE_BIND_NEW}")
 
 _mr_dlss_fg_sprite_replace(
     _mr_dlss_fg_sprite_video
