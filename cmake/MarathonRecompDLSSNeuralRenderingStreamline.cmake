@@ -27,14 +27,25 @@ if(NOT DEFINED _MR_DLSS_GENERATED_STREAMLINE OR
     message(FATAL_ERROR "DLSS NR Streamline layer could not find the generated Streamline source.")
 endif()
 
-# The FG layer has already expanded the feature list by the time this file runs.
-# Add NVIDIA's official NR plugin to the same initialization request.
+# The FG bootstrap first adds DLSS-G + Reflex, and the subsequent FG runtime
+# layer adds PCL for Present/Reflex markers. This module runs after both layers,
+# so patch the final generated feature list rather than the earlier FG-only form.
 file(READ "${_MR_DLSS_GENERATED_STREAMLINE}" _mr_dlss_nr_streamline)
 set(_MR_DLSS_NR_FEATURES_ANCHOR
-    "        static const sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex };")
+    "        static const sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL };")
 set(_MR_DLSS_NR_FEATURES_REPLACEMENT
-    "        static const sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeatureDLSS_NR };")
+    "        static const sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL, sl::kFeatureDLSS_NR };")
 string(FIND "${_mr_dlss_nr_streamline}" "${_MR_DLSS_NR_FEATURES_ANCHOR}" _mr_dlss_nr_features_offset)
+if(_mr_dlss_nr_features_offset EQUAL -1)
+    # Keep this layer tolerant of future include-order changes where it may run
+    # immediately after the FG bootstrap but before the PCL runtime patch.
+    set(_MR_DLSS_NR_FEATURES_ANCHOR
+        "        static const sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex };")
+    set(_MR_DLSS_NR_FEATURES_REPLACEMENT
+        "        static const sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeatureDLSS_NR };")
+    string(FIND "${_mr_dlss_nr_streamline}" "${_MR_DLSS_NR_FEATURES_ANCHOR}" _mr_dlss_nr_features_offset)
+endif()
+
 if(_mr_dlss_nr_features_offset EQUAL -1)
     message(FATAL_ERROR "DLSS NR Streamline patch failed while requesting kFeatureDLSS_NR; generated source changed.")
 endif()
