@@ -2,7 +2,7 @@
 //
 // The hashes below come from the exact DDS payloads in the game's sprite.arc.
 // They cover the normal gameplay/town HUD plus dialogue/pause, enemy gauge,
-// radar cover, trick-score, and amigo-window sprite families.  Names are also
+// radar cover, trick-score, and amigo-window sprite families. Names are also
 // checked as a readable fallback in case a texture payload is patched before
 // this classifier sees it.
 //
@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <unordered_set>
 
 static std::unordered_set<const GuestTexture*> g_dlssFGSpriteUITextures;
@@ -20,6 +21,7 @@ static uint32_t g_dlssFGSpriteUIDrawCount;
 static uint32_t g_dlssFGSpriteUICaptureAttemptCount;
 static uint32_t g_dlssFGSpriteUICaptureSuccessCount;
 static uint32_t g_dlssFGSpriteUIFirstSlot = UINT32_MAX;
+static bool g_dlssFGSpriteUIBindingPending;
 
 static constexpr uint64_t g_dlssFGKnownSpriteUIHashes[] =
 {
@@ -99,6 +101,7 @@ static void DLSSFGSpriteUIBeginFrame()
     g_dlssFGSpriteUICaptureAttemptCount = 0;
     g_dlssFGSpriteUICaptureSuccessCount = 0;
     g_dlssFGSpriteUIFirstSlot = UINT32_MAX;
+    g_dlssFGSpriteUIBindingPending = false;
 }
 
 static bool DLSSFGFindBoundSpriteUITexture(uint32_t& slot)
@@ -115,4 +118,25 @@ static bool DLSSFGFindBoundSpriteUITexture(uint32_t& slot)
 
     slot = UINT32_MAX;
     return false;
+}
+
+static void DLSSFGNoteTextureBinding(const GuestTexture* texture)
+{
+    if (texture != nullptr && g_dlssFGSpriteUITextures.contains(texture))
+        g_dlssFGSpriteUIBindingPending = true;
+}
+
+static bool DLSSFGConsumeSpriteUIBinding(uint32_t& slot)
+{
+    const bool pending = g_dlssFGSpriteUIBindingPending;
+    g_dlssFGSpriteUIBindingPending = false;
+    if (!pending)
+    {
+        slot = UINT32_MAX;
+        return false;
+    }
+
+    // Ignore stale slot contents: a texture must both have been explicitly bound
+    // since the preceding draw and still be present when this draw executes.
+    return DLSSFGFindBoundSpriteUITexture(slot);
 }
